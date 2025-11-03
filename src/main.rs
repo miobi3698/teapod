@@ -1,4 +1,4 @@
-use std::{error::Error, fmt::Display};
+use std::{error::Error, fmt::Display, time::Duration};
 
 use chrono::{DateTime, FixedOffset};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
@@ -6,7 +6,7 @@ use ratatui::{
     layout::{Constraint, Layout},
     style::{Style, Stylize},
     text::Text,
-    widgets::{Block, Cell, List, Paragraph, Row, Table, TableState},
+    widgets::{Block, BorderType, Cell, List, Paragraph, Row, Table, TableState},
 };
 
 struct Podcast {
@@ -130,19 +130,31 @@ async fn download_podcast_info(url: &str) -> Result<Podcast, Box<dyn Error>> {
     })
 }
 
+enum View {
+    Podcast,
+    Episode,
+    Add,
+    Update,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let urls = vec!["https://changelog.fm/rss"];
-    let podcasts = vec![download_podcast_info(urls[0]).await?];
-    let selected_podcast = 0;
+    let mut podcasts: Vec<Podcast> = Vec::new();
+    let mut selected_podcast = 0;
     let mut table_state = TableState::default().with_selected(0);
+    let mut current_view = View::Podcast;
 
     let mut terminal = ratatui::init();
     'main_loop: loop {
         terminal.draw(|frame| {
             frame.render_widget(
-                Paragraph::default()
-                    .block(Block::bordered().title("Teapod").title_bottom("q: quit")),
+                Paragraph::default().block(
+                    Block::bordered()
+                        .title("Teapod")
+                        .title_bottom("q: quit")
+                        .title_bottom("a: add")
+                        .title_bottom("u: update"),
+                ),
                 frame.area(),
             );
 
@@ -151,6 +163,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     .margin(1)
                     .areas(frame.area());
 
+            let podcasts_border = if matches!(current_view, View::Podcast) {
+                Block::bordered()
+                    .title("Podcasts")
+                    .border_type(BorderType::Double)
+                    .title_bottom("Enter: view")
+                    // TODO(miobi): implement this
+                    // .title_bottom("i: info")
+                    .title_bottom("k: up")
+                    .title_bottom("j: down")
+            } else {
+                Block::bordered().title("Podcasts")
+            };
             frame.render_widget(
                 List::new(podcasts.iter().enumerate().map(|(index, podcast)| {
                     if selected_podcast == index {
@@ -159,13 +183,29 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         Text::from(podcast.title.clone())
                     }
                 }))
-                .block(Block::bordered().title("Podcasts")),
+                .block(podcasts_border),
                 podcast_list_area,
             );
 
+            let episodes_border = if matches!(current_view, View::Episode) {
+                Block::bordered()
+                    .title("Episodes")
+                    .border_type(BorderType::Double)
+                    .title_bottom("Esc: back")
+                    // TODO(miobi): implement this
+                    // .title_bottom("i: info")
+                    .title_bottom("k: up")
+                    .title_bottom("j: down")
+            } else {
+                Block::bordered().title("Episodes")
+            };
+            let episodes = match podcasts.get(selected_podcast) {
+                Some(podcast) => &podcast.episodes,
+                None => &Vec::new(),
+            };
             frame.render_stateful_widget(
                 Table::new(
-                    podcasts[selected_podcast].episodes.iter().map(|episode| {
+                    episodes.iter().map(|episode| {
                         Row::new(vec![
                             Cell::from(Text::from(episode.title.clone())),
                             Cell::from(Text::from(episode.date.date_naive().to_string())),
@@ -173,22 +213,66 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     }),
                     [Constraint::Fill(1), Constraint::Length(10)],
                 )
-                .header(Row::new(vec!["Title", "Date"]).reversed())
+                .header(Row::new(vec!["Title", "Date", "Duration"]).underlined())
                 .row_highlight_style(Style::default().reversed())
-                .block(Block::bordered().title("Episodes")),
+                .block(episodes_border),
                 podcast_episode_list_area,
                 &mut table_state,
             );
         })?;
 
-        match event::read()? {
-            Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
-                match key_event.code {
-                    KeyCode::Char('q') => break 'main_loop,
-                    _ => {}
+        while event::poll(Duration::from_millis(250))? {
+            match event::read()? {
+                Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
+                    match key_event.code {
+                        KeyCode::Char('q') => break 'main_loop,
+                        KeyCode::Char('a') => {
+                            // TODO(miobi): implement this
+                            // current_view = View::Add;
+                            let url = "https://changelog.fm/rss";
+                            let podcast = download_podcast_info(url).await?;
+                            podcasts.push(podcast);
+                        }
+                        KeyCode::Char('u') => {
+                            // TODO(miobi): implement this
+                            // current_view = View::Update
+                            for podcast in podcasts.iter_mut() {
+                                *podcast = download_podcast_info(podcast.url.as_str()).await?;
+                            }
+                        }
+                        _ => {}
+                    }
+
+                    match current_view {
+                        View::Podcast => match key_event.code {
+                            KeyCode::Char('j') => {
+                                selected_podcast =
+                                    selected_podcast.saturating_add(1).min(podcasts.len() - 1)
+                            }
+                            KeyCode::Char('k') => {
+                                selected_podcast = selected_podcast.saturating_sub(1)
+                            }
+                            KeyCode::Enter => current_view = View::Episode,
+                            _ => {}
+                        },
+                        View::Episode => match key_event.code {
+                            KeyCode::Esc => current_view = View::Podcast,
+                            KeyCode::Char('j') => table_state.select_next(),
+                            KeyCode::Char('k') => table_state.select_previous(),
+                            _ => {}
+                        },
+                        View::Add => match key_event.code {
+                            KeyCode::Esc => current_view = View::Podcast,
+                            _ => {}
+                        },
+                        View::Update => match key_event.code {
+                            KeyCode::Esc => current_view = View::Podcast,
+                            _ => {}
+                        },
+                    }
                 }
+                _ => {}
             }
-            _ => {}
         }
     }
 
