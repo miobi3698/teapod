@@ -1,6 +1,6 @@
 use std::{error::Error, time::Duration};
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Style, Stylize},
@@ -30,6 +30,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut podcast_episodes_table_state = TableState::default().with_selected(0);
     let mut current_view = View::PodcastList;
     let mut add_url = String::new();
+    let mut clipboard = arboard::Clipboard::new()?;
 
     let mut terminal = ratatui::init();
     'main_loop: loop {
@@ -90,19 +91,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         Row::new(vec![
                             Cell::from(Text::from(episode.title.as_str())),
                             Cell::from(Text::from(episode.date.as_str())),
-                            Cell::from(Text::from(match &episode.duration {
-                                Some(duration) => duration.as_str(),
-                                None => "",
-                            })),
                         ])
                     }),
-                    [
-                        Constraint::Fill(2),
-                        Constraint::Length(10),
-                        Constraint::Length(8),
-                    ],
+                    [Constraint::Fill(2), Constraint::Length(10)],
                 )
-                .header(Row::new(vec!["Title", "Date", "Duration"]).underlined())
+                .header(Row::new(vec!["Title", "Date"]).underlined())
                 .row_highlight_style(Style::default().reversed())
                 .block(episodes_border),
                 podcast_episode_list_area,
@@ -179,6 +172,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 .title("Add podcast")
                                 .title_bottom("Esc: back")
                                 .title_bottom("p: paste")
+                                .title_bottom("d: delete")
                                 .title_bottom("Enter: add")
                                 .border_type(BorderType::Double),
                         ),
@@ -208,7 +202,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         while event::poll(Duration::from_millis(50))? {
             match event::read()? {
-                Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
+                Event::Key(key_event) if key_event.kind.is_press() => {
                     match key_event.code {
                         KeyCode::Char('q') => break 'main_loop,
                         KeyCode::Char('a') => {
@@ -264,8 +258,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         View::AddPodcast => match key_event.code {
                             KeyCode::Esc => current_view = View::PodcastList,
                             KeyCode::Char('p') => {
-                                // TODO(miobi): copy from clipboard
-                                add_url = "https://changelog.fm/rss".to_string();
+                                // add_url = "https://changelog.fm/rss".to_string();
+                                add_url = clipboard.get_text()?;
+                            }
+                            KeyCode::Char('d') => {
+                                add_url.clear();
                             }
                             KeyCode::Enter => {
                                 // TODO(miobi): save to file

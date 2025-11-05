@@ -14,12 +14,10 @@ pub struct Episode {
     pub description: String,
     pub date: String,
     audio: Audio,
-    pub duration: Option<String>,
 }
 
 pub struct Audio {
     mime_type: String,
-    length: usize,
     url: String,
 }
 
@@ -32,7 +30,7 @@ enum RssParseError {
 
 impl Display for RssParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self)
+        write!(f, "{:?}", self)
     }
 }
 
@@ -75,7 +73,7 @@ pub async fn download_podcast_info(url: &str) -> Result<Podcast, Box<dyn Error>>
                 .find(|e| e.has_tag_name("description"))
                 .ok_or(RssParseError::MissingTag)?
                 .text()
-                .ok_or(RssParseError::MissingValue)?
+                .unwrap_or_default()
                 .to_string();
             let episode_date = DateTime::parse_from_rfc2822(
                 elem.children()
@@ -86,12 +84,6 @@ pub async fn download_podcast_info(url: &str) -> Result<Podcast, Box<dyn Error>>
             )?
             .date_naive()
             .to_string();
-            let episode_duration = elem
-                .children()
-                .find(|e| e.has_tag_name("itunes:duration"))
-                .map(|e| e.text())
-                .flatten()
-                .map(|s| s.to_string());
 
             let episode_audio = {
                 let elem = elem
@@ -104,10 +96,6 @@ pub async fn download_podcast_info(url: &str) -> Result<Podcast, Box<dyn Error>>
                         .attribute("type")
                         .ok_or(RssParseError::MissingAttr)?
                         .to_string(),
-                    length: elem
-                        .attribute("length")
-                        .ok_or(RssParseError::MissingAttr)?
-                        .parse()?,
                     url: elem
                         .attribute("url")
                         .ok_or(RssParseError::MissingAttr)?
@@ -120,7 +108,6 @@ pub async fn download_podcast_info(url: &str) -> Result<Podcast, Box<dyn Error>>
                 description: episode_description,
                 date: episode_date,
                 audio: episode_audio,
-                duration: episode_duration,
             })
         })
         .collect();
