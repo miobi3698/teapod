@@ -1,134 +1,16 @@
-use std::{error::Error, fmt::Display, time::Duration};
+use std::{error::Error, time::Duration};
 
-use chrono::{DateTime, FixedOffset};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::{
-    layout::{Constraint, Layout},
+    layout::{Constraint, Layout, Rect},
     style::{Style, Stylize},
     text::Text,
-    widgets::{Block, BorderType, Cell, List, Paragraph, Row, Table, TableState},
+    widgets::{Block, BorderType, Cell, Clear, List, Paragraph, Row, Table, TableState, Widget},
 };
 
-struct Podcast {
-    title: String,
-    description: String,
-    url: String,
-    episodes: Vec<Episode>,
-}
+use crate::rss::{Podcast, download_podcast_info};
 
-struct Episode {
-    title: String,
-    description: String,
-    date: DateTime<FixedOffset>,
-    audio: Audio,
-}
-
-struct Audio {
-    mime_type: String,
-    length: usize,
-    url: String,
-}
-
-#[derive(Debug)]
-enum RssParseError {
-    MissingTag,
-    MissingValue,
-    MissingAttr,
-}
-
-impl Display for RssParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self)
-    }
-}
-
-impl Error for RssParseError {}
-
-async fn download_podcast_info(url: &str) -> Result<Podcast, Box<dyn Error>> {
-    let text = reqwest::get(url).await?.text().await?;
-    let rss = roxmltree::Document::parse(text.as_str())?;
-    let channel = rss
-        .descendants()
-        .find(|elem| elem.has_tag_name("channel"))
-        .ok_or(RssParseError::MissingTag)?;
-    let channel_title = channel
-        .children()
-        .find(|elem| elem.has_tag_name("title"))
-        .ok_or(RssParseError::MissingTag)?
-        .text()
-        .ok_or(RssParseError::MissingValue)?
-        .to_string();
-    let channel_description = channel
-        .children()
-        .find(|elem| elem.has_tag_name("title"))
-        .ok_or(RssParseError::MissingTag)?
-        .text()
-        .ok_or(RssParseError::MissingValue)?
-        .to_string();
-    let episodes: Result<Vec<_>, Box<dyn Error>> = channel
-        .children()
-        .filter(|elem| elem.has_tag_name("item"))
-        .map(|elem| {
-            let episode_title = elem
-                .children()
-                .find(|e| e.has_tag_name("title"))
-                .ok_or(RssParseError::MissingTag)?
-                .text()
-                .ok_or(RssParseError::MissingValue)?
-                .to_string();
-            let episode_description = elem
-                .children()
-                .find(|e| e.has_tag_name("description"))
-                .ok_or(RssParseError::MissingTag)?
-                .text()
-                .ok_or(RssParseError::MissingValue)?
-                .to_string();
-            let episode_date = DateTime::parse_from_rfc2822(
-                elem.children()
-                    .find(|e| e.has_tag_name("pubDate"))
-                    .ok_or(RssParseError::MissingTag)?
-                    .text()
-                    .ok_or(RssParseError::MissingValue)?,
-            )?;
-
-            let episode_audio = {
-                let elem = elem
-                    .children()
-                    .find(|e| e.has_tag_name("enclosure"))
-                    .ok_or(RssParseError::MissingTag)?;
-
-                Audio {
-                    mime_type: elem
-                        .attribute("type")
-                        .ok_or(RssParseError::MissingAttr)?
-                        .to_string(),
-                    length: elem
-                        .attribute("length")
-                        .ok_or(RssParseError::MissingAttr)?
-                        .parse()?,
-                    url: elem
-                        .attribute("url")
-                        .ok_or(RssParseError::MissingAttr)?
-                        .to_string(),
-                }
-            };
-
-            Ok(Episode {
-                title: episode_title,
-                description: episode_description,
-                date: episode_date,
-                audio: episode_audio,
-            })
-        })
-        .collect();
-
-    Ok(Podcast {
-        title: channel_title,
-        description: channel_description,
-        url: url.to_string(),
-        episodes: episodes?,
-    })
-}
+mod rss;
 
 enum View {
     Podcast,
@@ -141,8 +23,9 @@ enum View {
 async fn main() -> Result<(), Box<dyn Error>> {
     let mut podcasts: Vec<Podcast> = Vec::new();
     let mut selected_podcast = 0;
-    let mut table_state = TableState::default().with_selected(0);
+    let mut podcast_episodes_table_state = TableState::default().with_selected(0);
     let mut current_view = View::Podcast;
+    let mut add_url = String::new();
 
     let mut terminal = ratatui::init();
     'main_loop: loop {
@@ -209,16 +92,61 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         Row::new(vec![
                             Cell::from(Text::from(episode.title.clone())),
                             Cell::from(Text::from(episode.date.date_naive().to_string())),
+                            Cell::from(Text::from(episode.duration.clone())),
                         ])
                     }),
-                    [Constraint::Fill(1), Constraint::Length(10)],
+                    [
+                        Constraint::Fill(2),
+                        Constraint::Length(10),
+                        Constraint::Length(8),
+                    ],
                 )
                 .header(Row::new(vec!["Title", "Date", "Duration"]).underlined())
                 .row_highlight_style(Style::default().reversed())
                 .block(episodes_border),
                 podcast_episode_list_area,
-                &mut table_state,
+                &mut podcast_episodes_table_state,
             );
+
+            if matches!(current_view, View::Add) {
+                let popup_area = Rect {
+                    x: frame.area().width / 4,
+                    y: (frame.area().height - 3) / 2,
+                    width: frame.area().width / 2,
+                    height: 3,
+                };
+                Clear.render(popup_area, frame.buffer_mut());
+                frame.render_widget(
+                    Paragraph::new(add_url.clone()).block(
+                        Block::bordered()
+                            .title("Add podcast")
+                            .title_bottom("Esc: back")
+                            .title_bottom("p: paste")
+                            .title_bottom("Enter: add")
+                            .border_type(BorderType::Double),
+                    ),
+                    popup_area,
+                );
+            }
+
+            if matches!(current_view, View::Update) {
+                let popup_area = Rect {
+                    x: frame.area().width / 4,
+                    y: frame.area().height / 4,
+                    width: frame.area().width / 2,
+                    height: frame.area().height / 2,
+                };
+                Clear.render(popup_area, frame.buffer_mut());
+                frame.render_widget(
+                    Paragraph::new(add_url.clone()).block(
+                        Block::bordered()
+                            .title("Update podcasts")
+                            .title_bottom("Esc: back")
+                            .border_type(BorderType::Double),
+                    ),
+                    popup_area,
+                );
+            }
         })?;
 
         while event::poll(Duration::from_millis(250))? {
@@ -227,23 +155,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     match key_event.code {
                         KeyCode::Char('q') => break 'main_loop,
                         KeyCode::Char('a') => {
-                            // TODO(miobi): implement this
-                            // current_view = View::Add;
-                            let url = "https://changelog.fm/rss";
-                            let podcast = download_podcast_info(url).await?;
-                            podcasts.push(podcast);
+                            add_url.clear();
+                            current_view = View::Add;
                         }
                         KeyCode::Char('u') => {
+                            current_view = View::Update;
                             // TODO(miobi): implement this
-                            // current_view = View::Update
-                            for podcast in podcasts.iter_mut() {
-                                *podcast = download_podcast_info(podcast.url.as_str()).await?;
-                            }
+                            // for podcast in podcasts.iter_mut() {
+                            //     *podcast = download_podcast_info(podcast.url.as_str()).await?;
+                            // }
                         }
                         _ => {}
                     }
 
                     match current_view {
+                        // TODO(miobi): support delete podcast
                         View::Podcast => match key_event.code {
                             KeyCode::Char('j') => {
                                 selected_podcast =
@@ -252,17 +178,34 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             KeyCode::Char('k') => {
                                 selected_podcast = selected_podcast.saturating_sub(1)
                             }
-                            KeyCode::Enter => current_view = View::Episode,
+                            KeyCode::Enter => {
+                                current_view = View::Episode;
+                                if let Some(podcast) = podcasts.get(selected_podcast) {
+                                    if !podcast.episodes.is_empty() {
+                                        podcast_episodes_table_state.select(Some(0));
+                                    }
+                                }
+                            }
                             _ => {}
                         },
                         View::Episode => match key_event.code {
                             KeyCode::Esc => current_view = View::Podcast,
-                            KeyCode::Char('j') => table_state.select_next(),
-                            KeyCode::Char('k') => table_state.select_previous(),
+                            KeyCode::Char('j') => podcast_episodes_table_state.select_next(),
+                            KeyCode::Char('k') => podcast_episodes_table_state.select_previous(),
                             _ => {}
                         },
                         View::Add => match key_event.code {
                             KeyCode::Esc => current_view = View::Podcast,
+                            KeyCode::Char('p') => {
+                                // TODO(miobi): copy from clipboard
+                                add_url = "https://changelog.fm/rss".to_string();
+                            }
+                            KeyCode::Enter => {
+                                // TODO(miobi): save to file
+                                // TODO(miobi): check for duplicate
+                                let podcast = download_podcast_info(&add_url).await?;
+                                podcasts.push(podcast);
+                            }
                             _ => {}
                         },
                         View::Update => match key_event.code {
