@@ -5,7 +5,9 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Style, Stylize},
     text::Text,
-    widgets::{Block, BorderType, Cell, Clear, List, Paragraph, Row, Table, TableState, Widget},
+    widgets::{
+        Block, BorderType, Cell, Clear, List, Paragraph, Row, Table, TableState, Widget, Wrap,
+    },
 };
 
 use crate::rss::{Podcast, download_podcast_info};
@@ -13,10 +15,12 @@ use crate::rss::{Podcast, download_podcast_info};
 mod rss;
 
 enum View {
-    Podcast,
-    Episode,
-    Add,
-    Update,
+    PodcastList,
+    PodcastInfo,
+    EpisodeList,
+    EpisodeInfo,
+    AddPodcast,
+    UpdatePodcasts,
 }
 
 #[tokio::main]
@@ -24,7 +28,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut podcasts: Vec<Podcast> = Vec::new();
     let mut selected_podcast = 0;
     let mut podcast_episodes_table_state = TableState::default().with_selected(0);
-    let mut current_view = View::Podcast;
+    let mut current_view = View::PodcastList;
     let mut add_url = String::new();
 
     let mut terminal = ratatui::init();
@@ -46,7 +50,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     .margin(1)
                     .areas(frame.area());
 
-            let podcasts_border = if matches!(current_view, View::Podcast) {
+            let podcasts_border = if matches!(current_view, View::PodcastList) {
                 Block::bordered()
                     .title("Podcasts")
                     .border_type(BorderType::Double)
@@ -70,13 +74,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 podcast_list_area,
             );
 
-            let episodes_border = if matches!(current_view, View::Episode) {
+            let episodes_border = if matches!(current_view, View::EpisodeList) {
                 Block::bordered()
                     .title("Episodes")
                     .border_type(BorderType::Double)
                     .title_bottom("Esc: back")
-                    // TODO(miobi): implement this
-                    // .title_bottom("i: info")
+                    .title_bottom("i: info")
                     .title_bottom("k: up")
                     .title_bottom("j: down")
             } else {
@@ -92,60 +95,111 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         Row::new(vec![
                             Cell::from(Text::from(episode.title.clone())),
                             Cell::from(Text::from(episode.date.date_naive().to_string())),
-                            Cell::from(Text::from(episode.duration.clone())),
                         ])
                     }),
-                    [
-                        Constraint::Fill(2),
-                        Constraint::Length(10),
-                        Constraint::Length(8),
-                    ],
+                    [Constraint::Fill(2), Constraint::Length(10)],
                 )
-                .header(Row::new(vec!["Title", "Date", "Duration"]).underlined())
+                .header(Row::new(vec!["Title", "Date"]).underlined())
                 .row_highlight_style(Style::default().reversed())
                 .block(episodes_border),
                 podcast_episode_list_area,
                 &mut podcast_episodes_table_state,
             );
 
-            if matches!(current_view, View::Add) {
-                let popup_area = Rect {
-                    x: frame.area().width / 4,
-                    y: (frame.area().height - 3) / 2,
-                    width: frame.area().width / 2,
-                    height: 3,
-                };
-                Clear.render(popup_area, frame.buffer_mut());
-                frame.render_widget(
-                    Paragraph::new(add_url.clone()).block(
-                        Block::bordered()
-                            .title("Add podcast")
-                            .title_bottom("Esc: back")
-                            .title_bottom("p: paste")
-                            .title_bottom("Enter: add")
-                            .border_type(BorderType::Double),
-                    ),
-                    popup_area,
-                );
-            }
-
-            if matches!(current_view, View::Update) {
-                let popup_area = Rect {
-                    x: frame.area().width / 4,
-                    y: frame.area().height / 4,
-                    width: frame.area().width / 2,
-                    height: frame.area().height / 2,
-                };
-                Clear.render(popup_area, frame.buffer_mut());
-                frame.render_widget(
-                    Paragraph::new(add_url.clone()).block(
-                        Block::bordered()
-                            .title("Update podcasts")
-                            .title_bottom("Esc: back")
-                            .border_type(BorderType::Double),
-                    ),
-                    popup_area,
-                );
+            match current_view {
+                View::PodcastList => {}
+                View::EpisodeList => {}
+                View::PodcastInfo => {
+                    let popup_area = Rect {
+                        x: frame.area().width / 4,
+                        y: frame.area().height / 4,
+                        width: frame.area().width / 2,
+                        height: frame.area().height / 2,
+                    };
+                    Clear.render(popup_area, frame.buffer_mut());
+                    let podcast_info = if let Some(podcast) = podcasts.get(selected_podcast) {
+                        podcast.description.clone()
+                    } else {
+                        "No info".to_string()
+                    };
+                    frame.render_widget(
+                        Paragraph::new(podcast_info)
+                            .block(
+                                Block::bordered()
+                                    .title("Podcast info")
+                                    .title_bottom("Esc: back")
+                                    .border_type(BorderType::Double),
+                            )
+                            .wrap(Wrap { trim: true }),
+                        popup_area,
+                    );
+                }
+                View::EpisodeInfo => {
+                    let popup_area = Rect {
+                        x: frame.area().width / 4,
+                        y: frame.area().height / 4,
+                        width: frame.area().width / 2,
+                        height: frame.area().height / 2,
+                    };
+                    Clear.render(popup_area, frame.buffer_mut());
+                    let episode_info = if let Some(index) = podcast_episodes_table_state.selected()
+                    {
+                        podcasts[selected_podcast].episodes[index]
+                            .description
+                            .clone()
+                    } else {
+                        "No info".to_string()
+                    };
+                    frame.render_widget(
+                        Paragraph::new(episode_info)
+                            .block(
+                                Block::bordered()
+                                    .title("Episode info")
+                                    .title_bottom("Esc: back")
+                                    .border_type(BorderType::Double),
+                            )
+                            .wrap(Wrap { trim: true }),
+                        popup_area,
+                    );
+                }
+                View::AddPodcast => {
+                    let popup_area = Rect {
+                        x: frame.area().width / 4,
+                        y: (frame.area().height - 3) / 2,
+                        width: frame.area().width / 2,
+                        height: 3,
+                    };
+                    Clear.render(popup_area, frame.buffer_mut());
+                    frame.render_widget(
+                        Paragraph::new(add_url.clone()).block(
+                            Block::bordered()
+                                .title("Add podcast")
+                                .title_bottom("Esc: back")
+                                .title_bottom("p: paste")
+                                .title_bottom("Enter: add")
+                                .border_type(BorderType::Double),
+                        ),
+                        popup_area,
+                    );
+                }
+                View::UpdatePodcasts => {
+                    let popup_area = Rect {
+                        x: frame.area().width / 4,
+                        y: frame.area().height / 4,
+                        width: frame.area().width / 2,
+                        height: frame.area().height / 2,
+                    };
+                    Clear.render(popup_area, frame.buffer_mut());
+                    frame.render_widget(
+                        Paragraph::new(add_url.clone()).block(
+                            Block::bordered()
+                                .title("Update podcasts")
+                                .title_bottom("Esc: back")
+                                .border_type(BorderType::Double),
+                        ),
+                        popup_area,
+                    );
+                }
             }
         })?;
 
@@ -156,10 +210,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         KeyCode::Char('q') => break 'main_loop,
                         KeyCode::Char('a') => {
                             add_url.clear();
-                            current_view = View::Add;
+                            current_view = View::AddPodcast;
                         }
                         KeyCode::Char('u') => {
-                            current_view = View::Update;
+                            current_view = View::UpdatePodcasts;
                             // TODO(miobi): implement this
                             // for podcast in podcasts.iter_mut() {
                             //     *podcast = download_podcast_info(podcast.url.as_str()).await?;
@@ -170,7 +224,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                     match current_view {
                         // TODO(miobi): support delete podcast
-                        View::Podcast => match key_event.code {
+                        View::PodcastList => match key_event.code {
                             KeyCode::Char('j') => {
                                 selected_podcast =
                                     selected_podcast.saturating_add(1).min(podcasts.len() - 1)
@@ -178,8 +232,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             KeyCode::Char('k') => {
                                 selected_podcast = selected_podcast.saturating_sub(1)
                             }
+                            KeyCode::Char('i') => current_view = View::PodcastInfo,
                             KeyCode::Enter => {
-                                current_view = View::Episode;
+                                current_view = View::EpisodeList;
                                 if let Some(podcast) = podcasts.get(selected_podcast) {
                                     if !podcast.episodes.is_empty() {
                                         podcast_episodes_table_state.select(Some(0));
@@ -188,14 +243,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             }
                             _ => {}
                         },
-                        View::Episode => match key_event.code {
-                            KeyCode::Esc => current_view = View::Podcast,
-                            KeyCode::Char('j') => podcast_episodes_table_state.select_next(),
-                            KeyCode::Char('k') => podcast_episodes_table_state.select_previous(),
+                        View::PodcastInfo => match key_event.code {
+                            KeyCode::Esc => current_view = View::PodcastList,
                             _ => {}
                         },
-                        View::Add => match key_event.code {
-                            KeyCode::Esc => current_view = View::Podcast,
+                        View::EpisodeList => match key_event.code {
+                            KeyCode::Esc => current_view = View::PodcastList,
+                            KeyCode::Char('j') => podcast_episodes_table_state.select_next(),
+                            KeyCode::Char('k') => podcast_episodes_table_state.select_previous(),
+                            KeyCode::Char('i') => current_view = View::EpisodeInfo,
+                            _ => {}
+                        },
+                        View::EpisodeInfo => match key_event.code {
+                            KeyCode::Esc => current_view = View::EpisodeList,
+                            _ => {}
+                        },
+                        View::AddPodcast => match key_event.code {
+                            KeyCode::Esc => current_view = View::PodcastList,
                             KeyCode::Char('p') => {
                                 // TODO(miobi): copy from clipboard
                                 add_url = "https://changelog.fm/rss".to_string();
@@ -205,11 +269,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 // TODO(miobi): check for duplicate
                                 let podcast = download_podcast_info(&add_url).await?;
                                 podcasts.push(podcast);
+                                current_view = View::PodcastList;
                             }
                             _ => {}
                         },
-                        View::Update => match key_event.code {
-                            KeyCode::Esc => current_view = View::Podcast,
+                        View::UpdatePodcasts => match key_event.code {
+                            KeyCode::Esc => current_view = View::PodcastList,
                             _ => {}
                         },
                     }

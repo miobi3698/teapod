@@ -4,17 +4,16 @@ use chrono::{DateTime, FixedOffset};
 
 pub struct Podcast {
     pub title: String,
-    description: String,
+    pub description: String,
     pub url: String,
     pub episodes: Vec<Episode>,
 }
 
 pub struct Episode {
     pub title: String,
-    description: String,
+    pub description: String,
     pub date: DateTime<FixedOffset>,
     audio: Audio,
-    pub duration: String,
 }
 
 pub struct Audio {
@@ -84,13 +83,6 @@ pub async fn download_podcast_info(url: &str) -> Result<Podcast, Box<dyn Error>>
                     .text()
                     .ok_or(RssParseError::MissingValue)?,
             )?;
-            let episode_duration = elem
-                .children()
-                .find(|e| e.has_tag_name("itunes:duration"))
-                .ok_or(RssParseError::MissingTag)?
-                .text()
-                .ok_or(RssParseError::MissingValue)?
-                .to_string();
 
             let episode_audio = {
                 let elem = elem
@@ -119,7 +111,6 @@ pub async fn download_podcast_info(url: &str) -> Result<Podcast, Box<dyn Error>>
                 description: episode_description,
                 date: episode_date,
                 audio: episode_audio,
-                duration: episode_duration,
             })
         })
         .collect();
