@@ -1,6 +1,6 @@
 use std::{error::Error, fmt::Display};
 
-use chrono::{DateTime, FixedOffset};
+use chrono::DateTime;
 
 pub struct Podcast {
     pub title: String,
@@ -12,8 +12,9 @@ pub struct Podcast {
 pub struct Episode {
     pub title: String,
     pub description: String,
-    pub date: DateTime<FixedOffset>,
+    pub date: String,
     audio: Audio,
+    pub duration: Option<String>,
 }
 
 pub struct Audio {
@@ -82,7 +83,15 @@ pub async fn download_podcast_info(url: &str) -> Result<Podcast, Box<dyn Error>>
                     .ok_or(RssParseError::MissingTag)?
                     .text()
                     .ok_or(RssParseError::MissingValue)?,
-            )?;
+            )?
+            .date_naive()
+            .to_string();
+            let episode_duration = elem
+                .children()
+                .find(|e| e.has_tag_name("itunes:duration"))
+                .map(|e| e.text())
+                .flatten()
+                .map(|s| s.to_string());
 
             let episode_audio = {
                 let elem = elem
@@ -111,6 +120,7 @@ pub async fn download_podcast_info(url: &str) -> Result<Podcast, Box<dyn Error>>
                 description: episode_description,
                 date: episode_date,
                 audio: episode_audio,
+                duration: episode_duration,
             })
         })
         .collect();

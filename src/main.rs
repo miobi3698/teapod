@@ -55,19 +55,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     .title("Podcasts")
                     .border_type(BorderType::Double)
                     .title_bottom("Enter: view")
-                    // TODO(miobi): implement this
-                    // .title_bottom("i: info")
-                    .title_bottom("k: up")
-                    .title_bottom("j: down")
+                    .title_bottom("i: info")
             } else {
                 Block::bordered().title("Podcasts")
             };
             frame.render_widget(
                 List::new(podcasts.iter().enumerate().map(|(index, podcast)| {
                     if selected_podcast == index {
-                        Text::from(podcast.title.clone()).reversed()
+                        Text::from(podcast.title.as_str()).reversed()
                     } else {
-                        Text::from(podcast.title.clone())
+                        Text::from(podcast.title.as_str())
                     }
                 }))
                 .block(podcasts_border),
@@ -80,8 +77,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     .border_type(BorderType::Double)
                     .title_bottom("Esc: back")
                     .title_bottom("i: info")
-                    .title_bottom("k: up")
-                    .title_bottom("j: down")
             } else {
                 Block::bordered().title("Episodes")
             };
@@ -93,13 +88,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 Table::new(
                     episodes.iter().map(|episode| {
                         Row::new(vec![
-                            Cell::from(Text::from(episode.title.clone())),
-                            Cell::from(Text::from(episode.date.date_naive().to_string())),
+                            Cell::from(Text::from(episode.title.as_str())),
+                            Cell::from(Text::from(episode.date.as_str())),
+                            Cell::from(Text::from(match &episode.duration {
+                                Some(duration) => duration.as_str(),
+                                None => "",
+                            })),
                         ])
                     }),
-                    [Constraint::Fill(2), Constraint::Length(10)],
+                    [
+                        Constraint::Fill(2),
+                        Constraint::Length(10),
+                        Constraint::Length(8),
+                    ],
                 )
-                .header(Row::new(vec!["Title", "Date"]).underlined())
+                .header(Row::new(vec!["Title", "Date", "Duration"]).underlined())
                 .row_highlight_style(Style::default().reversed())
                 .block(episodes_border),
                 podcast_episode_list_area,
@@ -118,9 +121,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     };
                     Clear.render(popup_area, frame.buffer_mut());
                     let podcast_info = if let Some(podcast) = podcasts.get(selected_podcast) {
-                        podcast.description.clone()
+                        podcast.description.as_str()
                     } else {
-                        "No info".to_string()
+                        "No info"
                     };
                     frame.render_widget(
                         Paragraph::new(podcast_info)
@@ -146,9 +149,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     {
                         podcasts[selected_podcast].episodes[index]
                             .description
-                            .clone()
+                            .as_str()
                     } else {
-                        "No info".to_string()
+                        "No info"
                     };
                     frame.render_widget(
                         Paragraph::new(episode_info)
@@ -171,7 +174,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     };
                     Clear.render(popup_area, frame.buffer_mut());
                     frame.render_widget(
-                        Paragraph::new(add_url.clone()).block(
+                        Paragraph::new(add_url.as_str()).block(
                             Block::bordered()
                                 .title("Add podcast")
                                 .title_bottom("Esc: back")
@@ -191,7 +194,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     };
                     Clear.render(popup_area, frame.buffer_mut());
                     frame.render_widget(
-                        Paragraph::new(add_url.clone()).block(
+                        Paragraph::default().block(
                             Block::bordered()
                                 .title("Update podcasts")
                                 .title_bottom("Esc: back")
@@ -203,7 +206,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         })?;
 
-        while event::poll(Duration::from_millis(250))? {
+        while event::poll(Duration::from_millis(50))? {
             match event::read()? {
                 Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
                     match key_event.code {
