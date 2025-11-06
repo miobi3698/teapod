@@ -1,5 +1,6 @@
 use std::{error::Error, time::Duration};
 
+use arboard::Clipboard;
 use crossterm::event::{self, Event, KeyCode};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -21,6 +22,7 @@ enum View {
     EpisodeInfo,
     AddPodcast,
     UpdatePodcasts,
+    ErrorInfo,
 }
 
 #[tokio::main]
@@ -30,7 +32,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut podcast_episodes_table_state = TableState::default().with_selected(0);
     let mut current_view = View::PodcastList;
     let mut add_url = String::new();
-    let mut clipboard = arboard::Clipboard::new()?;
+    let mut error_msg = String::new();
 
     let mut terminal = ratatui::init();
     'main_loop: loop {
@@ -197,6 +199,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         popup_area,
                     );
                 }
+                View::ErrorInfo => {
+                    let popup_area = Rect {
+                        x: frame.area().width / 4,
+                        y: frame.area().height / 4,
+                        width: frame.area().width / 2,
+                        height: frame.area().height / 2,
+                    };
+                    Clear.render(popup_area, frame.buffer_mut());
+                    frame.render_widget(
+                        Paragraph::new(error_msg.as_str()).block(
+                            Block::bordered()
+                                .title("Error info")
+                                .title_bottom("Esc: back")
+                                .border_type(BorderType::Double),
+                        ),
+                        popup_area,
+                    );
+                }
             }
         })?;
 
@@ -259,7 +279,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             KeyCode::Esc => current_view = View::PodcastList,
                             KeyCode::Char('p') => {
                                 // add_url = "https://changelog.fm/rss".to_string();
-                                add_url = clipboard.get_text()?;
+                                match Clipboard::new()
+                                    .map(|mut clipboard| clipboard.get_text())
+                                    .flatten()
+                                {
+                                    Ok(url) => add_url = url,
+                                    Err(err) => {
+                                        error_msg = err.to_string();
+                                        current_view = View::ErrorInfo;
+                                    }
+                                }
                             }
                             KeyCode::Char('d') => {
                                 add_url.clear();
@@ -267,13 +296,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             KeyCode::Enter => {
                                 // TODO(miobi): save to file
                                 // TODO(miobi): check for duplicate
-                                let podcast = download_podcast_info(&add_url).await?;
-                                podcasts.push(podcast);
-                                current_view = View::PodcastList;
+                                match download_podcast_info(&add_url).await {
+                                    Ok(podcast) => {
+                                        podcasts.push(podcast);
+                                        current_view = View::PodcastList;
+                                    }
+                                    Err(err) => {
+                                        error_msg = err.to_string();
+                                        current_view = View::ErrorInfo;
+                                    }
+                                }
                             }
                             _ => {}
                         },
                         View::UpdatePodcasts => match key_event.code {
+                            KeyCode::Esc => current_view = View::PodcastList,
+                            _ => {}
+                        },
+                        View::ErrorInfo => match key_event.code {
                             KeyCode::Esc => current_view = View::PodcastList,
                             _ => {}
                         },
