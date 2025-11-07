@@ -295,15 +295,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             }
                             KeyCode::Enter => {
                                 // TODO(miobi): save to file
-                                // TODO(miobi): check for duplicate
-                                match download_podcast_info(&add_url).await {
-                                    Ok(podcast) => {
-                                        podcasts.push(podcast);
-                                        current_view = View::PodcastList;
-                                    }
-                                    Err(err) => {
-                                        error_msg = err.to_string();
-                                        current_view = View::ErrorInfo;
+                                if let Some(_) =
+                                    podcasts.iter().find(|podcast| podcast.url == add_url)
+                                {
+                                    error_msg = "Podcast already exist in the list".to_string();
+                                    current_view = View::ErrorInfo;
+                                } else {
+                                    match download_podcast_info(&add_url).await {
+                                        Ok(podcast) => {
+                                            podcasts.push(podcast);
+                                            current_view = View::PodcastList;
+                                        }
+                                        Err(err) => {
+                                            error_msg =
+                                                format!("Error while parsing rss file: {err}");
+                                            current_view = View::ErrorInfo;
+                                        }
                                     }
                                 }
                             }
