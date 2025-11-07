@@ -1,4 +1,4 @@
-use std::{error::Error, time::Duration};
+use std::{collections::HashMap, error::Error, time::Duration};
 
 use arboard::Clipboard;
 use crossterm::event::{self, Event, KeyCode};
@@ -48,6 +48,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut current_view = View::PodcastList;
     let mut add_url = String::new();
     let mut error_msg = String::new();
+    let mut updating_podcast_list: HashMap<String, bool> = HashMap::new();
 
     let mut terminal = ratatui::init();
     'main_loop: loop {
@@ -205,7 +206,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     };
                     Clear.render(popup_area, frame.buffer_mut());
                     frame.render_widget(
-                        Paragraph::default().block(
+                        Table::new(
+                            updating_podcast_list.iter().map(|(name, status)| {
+                                Row::new(vec![
+                                    Cell::new(name.as_str()),
+                                    Cell::new(status.to_string()),
+                                ])
+                            }),
+                            [Constraint::Fill(1), Constraint::Length(16)],
+                        )
+                        .block(
                             Block::bordered()
                                 .title("Update podcasts")
                                 .title_bottom("Esc: back")
@@ -246,16 +256,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         }
                         KeyCode::Char('u') => {
                             current_view = View::UpdatePodcasts;
-                            // TODO(miobi): implement this
-                            // for podcast in podcasts.iter_mut() {
-                            //     *podcast = download_podcast_info(podcast.url.as_str()).await?;
-                            // }
+                            updating_podcast_list.clear();
+                            for podcast in &podcasts {
+                                updating_podcast_list.insert(podcast.title.clone(), false);
+                            }
+
+                            for podcast in podcasts.iter_mut() {
+                                *podcast = download_podcast_info(podcast.url.as_str()).await?;
+                                if let Some(status) = updating_podcast_list.get_mut(&podcast.title)
+                                {
+                                    *status = true;
+                                }
+                            }
                         }
                         _ => {}
                     }
 
                     match current_view {
-                        // TODO(miobi): support delete podcast
                         View::PodcastList => match key_event.code {
                             KeyCode::Char('j') => {
                                 selected_podcast =
@@ -265,6 +282,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 selected_podcast = selected_podcast.saturating_sub(1)
                             }
                             KeyCode::Char('i') => current_view = View::PodcastInfo,
+                            KeyCode::Char('d') => {
+                                // TODO(miobi): support delete podcast
+                            }
                             KeyCode::Enter => {
                                 current_view = View::EpisodeList;
                                 if let Some(podcast) = podcasts.get(selected_podcast) {
