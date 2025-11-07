@@ -11,7 +11,7 @@ use ratatui::{
     },
 };
 
-use crate::rss::{Podcast, download_podcast_info};
+use crate::rss::{Podcast, download_podcast_info, save_podcast_info};
 
 mod rss;
 
@@ -27,7 +27,22 @@ enum View {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    let data_path = std::env::home_dir().unwrap().join(".local/share/teapod");
+    if !data_path.exists() {
+        std::fs::create_dir(&data_path)?;
+    }
+
     let mut podcasts: Vec<Podcast> = Vec::new();
+    for entry in std::fs::read_dir(&data_path)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().map(|ext| ext == "json").unwrap_or(false) {
+            let contents = tokio::fs::read_to_string(path).await?;
+            let podcast = serde_json::from_str(&contents)?;
+            podcasts.push(podcast);
+        }
+    }
+
     let mut selected_podcast = 0;
     let mut podcast_episodes_table_state = TableState::default().with_selected(0);
     let mut current_view = View::PodcastList;
@@ -303,12 +318,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 } else {
                                     match download_podcast_info(&add_url).await {
                                         Ok(podcast) => {
-                                            podcasts.push(podcast);
-                                            current_view = View::PodcastList;
+                                            match save_podcast_info(&podcast, &data_path).await {
+                                                Ok(_) => {
+                                                    podcasts.push(podcast);
+                                                    current_view = View::PodcastList;
+                                                }
+                                                Err(err) => {
+                                                    error_msg = format!(
+                                                        "Error while adding podcast: {err}"
+                                                    );
+                                                    current_view = View::ErrorInfo;
+                                                }
+                                            }
                                         }
                                         Err(err) => {
                                             error_msg =
-                                                format!("Error while parsing rss file: {err}");
+                                                format!("Error while adding podcast: {err}");
                                             current_view = View::ErrorInfo;
                                         }
                                     }

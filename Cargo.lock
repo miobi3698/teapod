@@ -1736,6 +1736,8 @@ dependencies = [
  "ratatui",
  "reqwest",
  "roxmltree",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

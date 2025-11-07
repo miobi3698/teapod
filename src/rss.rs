@@ -1,7 +1,9 @@
-use std::{error::Error, fmt::Display};
+use std::{error::Error, fmt::Display, path::Path};
 
 use chrono::DateTime;
+use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Podcast {
     pub title: String,
     pub description: String,
@@ -9,6 +11,7 @@ pub struct Podcast {
     pub episodes: Vec<Episode>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Episode {
     pub title: String,
     pub description: String,
@@ -16,6 +19,7 @@ pub struct Episode {
     audio: Audio,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Audio {
     mime_type: String,
     url: String,
@@ -118,4 +122,11 @@ pub async fn download_podcast_info(url: &str) -> Result<Podcast, Box<dyn Error>>
         url: url.to_string(),
         episodes: episodes?,
     })
+}
+
+pub async fn save_podcast_info(podcast: &Podcast, path: &Path) -> Result<(), Box<dyn Error>> {
+    let path = path.join(&podcast.title).with_extension("json");
+    let contents = serde_json::to_string_pretty(podcast)?;
+    tokio::fs::write(path, contents).await?;
+    Ok(())
 }
