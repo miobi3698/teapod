@@ -11,7 +11,7 @@ use ratatui::{
     },
 };
 
-use crate::rss::{Podcast, download_podcast_info, save_podcast_info};
+use crate::rss::{Podcast, download_and_save_podcast_info, load_podcast_info_from_file};
 
 mod rss;
 
@@ -26,21 +26,23 @@ enum View {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let data_path = std::env::home_dir().unwrap().join(".local/share/teapod");
     if !data_path.exists() {
         std::fs::create_dir(&data_path)?;
     }
 
     let mut podcasts: Vec<Podcast> = Vec::new();
+    let mut load_tasks = tokio::task::JoinSet::new();
     for entry in std::fs::read_dir(&data_path)? {
-        let entry = entry?;
-        let path = entry.path();
+        let path = entry?.path();
         if path.extension().map(|ext| ext == "json").unwrap_or(false) {
-            let contents = tokio::fs::read_to_string(path).await?;
-            let podcast = serde_json::from_str(&contents)?;
-            podcasts.push(podcast);
+            load_tasks.spawn(load_podcast_info_from_file(path));
         }
+    }
+
+    while let Some(podcast) = load_tasks.join_next().await {
+        podcasts.push(podcast??);
     }
 
     let mut selected_podcast = 0;
@@ -64,10 +66,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 frame.area(),
             );
 
-            let [podcast_list_area, podcast_episode_list_area] =
-                Layout::horizontal([Constraint::Fill(1), Constraint::Fill(2)])
+            let [list_areas, player_area] =
+                Layout::vertical([Constraint::Fill(1), Constraint::Length(3)])
                     .margin(1)
                     .areas(frame.area());
+
+            let [podcast_list_area, podcast_episode_list_area] =
+                Layout::horizontal([Constraint::Fill(1), Constraint::Fill(2)]).areas(list_areas);
 
             let podcasts_border = if matches!(current_view, View::PodcastList) {
                 Block::bordered()
@@ -86,6 +91,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         Text::from(podcast.title.as_str())
                     }
                 }))
+                .repeat_highlight_symbol(true)
                 .block(podcasts_border),
                 podcast_list_area,
             );
@@ -118,6 +124,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .block(episodes_border),
                 podcast_episode_list_area,
                 &mut podcast_episodes_table_state,
+            );
+
+            frame.render_widget(
+                Paragraph::default().block(Block::bordered().title("Player")),
+                player_area,
             );
 
             match current_view {
@@ -207,14 +218,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     Clear.render(popup_area, frame.buffer_mut());
                     frame.render_widget(
                         Table::new(
-                            updating_podcast_list.iter().map(|(name, status)| {
+                            updating_podcast_list.iter().map(|(name, is_done)| {
                                 Row::new(vec![
                                     Cell::new(name.as_str()),
-                                    Cell::new(status.to_string()),
+                                    Cell::new(if *is_done { "Done" } else { "Downloading" }),
                                 ])
                             }),
-                            [Constraint::Fill(1), Constraint::Length(16)],
+                            [Constraint::Fill(1), Constraint::Length(11)],
                         )
+                        .header(Row::new(vec!["Podcast", "Status"]).underlined())
                         .block(
                             Block::bordered()
                                 .title("Update podcasts")
@@ -257,17 +269,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         KeyCode::Char('u') => {
                             current_view = View::UpdatePodcasts;
                             updating_podcast_list.clear();
+                            let mut update_tasks = tokio::task::JoinSet::new();
                             for podcast in &podcasts {
                                 updating_podcast_list.insert(podcast.title.clone(), false);
+                                update_tasks.spawn(download_and_save_podcast_info(
+                                    podcast.url.clone(),
+                                    data_path.clone(),
+                                ));
                             }
 
-                            for podcast in podcasts.iter_mut() {
-                                *podcast = download_podcast_info(podcast.url.as_str()).await?;
-                                if let Some(status) = updating_podcast_list.get_mut(&podcast.title)
-                                {
-                                    *status = true;
-                                }
+                            let mut new_podcasts = Vec::new();
+                            while let Some(new_podcast) = update_tasks.join_next().await {
+                                let new_podcast = new_podcast??;
+                                updating_podcast_list.insert(new_podcast.title.clone(), true);
+                                new_podcasts.push(new_podcast);
                             }
+
+                            podcasts.clear();
+                            podcasts.append(&mut new_podcasts);
                         }
                         _ => {}
                     }
@@ -329,34 +348,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 add_url.clear();
                             }
                             KeyCode::Enter => {
-                                // TODO(miobi): save to file
                                 if let Some(_) =
                                     podcasts.iter().find(|podcast| podcast.url == add_url)
                                 {
                                     error_msg = "Podcast already exist in the list".to_string();
                                     current_view = View::ErrorInfo;
                                 } else {
-                                    match download_podcast_info(&add_url).await {
-                                        Ok(podcast) => {
-                                            match save_podcast_info(&podcast, &data_path).await {
-                                                Ok(_) => {
-                                                    podcasts.push(podcast);
-                                                    current_view = View::PodcastList;
-                                                }
-                                                Err(err) => {
-                                                    error_msg = format!(
-                                                        "Error while adding podcast: {err}"
-                                                    );
-                                                    current_view = View::ErrorInfo;
-                                                }
-                                            }
-                                        }
-                                        Err(err) => {
-                                            error_msg =
-                                                format!("Error while adding podcast: {err}");
-                                            current_view = View::ErrorInfo;
-                                        }
-                                    }
+                                    let handle =
+                                        tokio::task::spawn(download_and_save_podcast_info(
+                                            add_url.clone(),
+                                            data_path.clone(),
+                                        ));
+
+                                    let podcast = handle.await??;
+                                    podcasts.push(podcast);
                                 }
                             }
                             _ => {}

@@ -1,4 +1,4 @@
-use std::{error::Error, fmt::Display, path::Path};
+use std::{error::Error, fmt::Display, io, path::PathBuf};
 
 use chrono::DateTime;
 use serde::{Deserialize, Serialize};
@@ -40,8 +40,8 @@ impl Display for RssParseError {
 
 impl Error for RssParseError {}
 
-pub async fn download_podcast_info(url: &str) -> Result<Podcast, Box<dyn Error>> {
-    let text = reqwest::get(url).await?.text().await?;
+async fn download_podcast_info(url: String) -> Result<Podcast, Box<dyn Error + Send + Sync>> {
+    let text = reqwest::get(url.as_str()).await?.text().await?;
     let rss = roxmltree::Document::parse(text.as_str())?;
     let channel = rss
         .descendants()
@@ -61,7 +61,7 @@ pub async fn download_podcast_info(url: &str) -> Result<Podcast, Box<dyn Error>>
         .text()
         .ok_or(RssParseError::MissingValue)?
         .to_string();
-    let episodes: Result<Vec<_>, Box<dyn Error>> = channel
+    let episodes: Result<Vec<_>, Box<dyn Error + Send + Sync>> = channel
         .children()
         .filter(|elem| elem.has_tag_name("item"))
         .map(|elem| {
@@ -124,9 +124,24 @@ pub async fn download_podcast_info(url: &str) -> Result<Podcast, Box<dyn Error>>
     })
 }
 
-pub async fn save_podcast_info(podcast: &Podcast, path: &Path) -> Result<(), Box<dyn Error>> {
+async fn save_podcast_info(podcast: &Podcast, path: PathBuf) -> io::Result<()> {
     let path = path.join(&podcast.title).with_extension("json");
     let contents = serde_json::to_string_pretty(podcast)?;
     tokio::fs::write(path, contents).await?;
     Ok(())
+}
+
+pub async fn download_and_save_podcast_info(
+    url: String,
+    path: PathBuf,
+) -> Result<Podcast, Box<dyn Error + Send + Sync>> {
+    let podcast = download_podcast_info(url).await?;
+    save_podcast_info(&podcast, path).await?;
+    Ok(podcast)
+}
+
+pub async fn load_podcast_info_from_file(path: PathBuf) -> io::Result<Podcast> {
+    let contents = tokio::fs::read_to_string(&path).await?;
+    let podcast = serde_json::from_str(&contents)?;
+    Ok(podcast)
 }
