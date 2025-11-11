@@ -9,6 +9,7 @@ chrono = "0.4.42"
 crossterm = "0.29.0"
 ratatui = { version = "0.29.0", features = ["all-widgets"] }
 reqwest = "0.12.24"
+rodio = "0.21.1"
 roxmltree = "0.21.1"
 serde = "1.0.228"
 serde_json = "1.0.145"
