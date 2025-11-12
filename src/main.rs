@@ -1,4 +1,4 @@
-use std::{error::Error, fs::File, io::BufReader, vec};
+use std::{error::Error, fs::File, io::BufReader, time::Duration};
 
 use arboard::Clipboard;
 use chrono::DateTime;
@@ -12,7 +12,7 @@ use ratatui::{
         ScrollbarState, Table, TableState, Widget, Wrap,
     },
 };
-use rodio::Sink;
+use rodio::{Decoder, Sink, Source};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -37,6 +37,12 @@ enum View {
     AddPodcast,
     EpisodeList,
     EpisodeInfo,
+}
+
+struct Audio {
+    title: String,
+    total_duration: Duration,
+    sink: Sink,
 }
 
 #[tokio::main]
@@ -84,9 +90,12 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     let mut url_to_add = String::new();
 
-    let mut player_title = String::new();
-    let player_stream_handle = rodio::OutputStreamBuilder::open_default_stream()?;
-    let mut player_sink: Option<Sink> = None;
+    let player_stream_handle = {
+        let mut handle = rodio::OutputStreamBuilder::open_default_stream()?;
+        handle.log_on_drop(false);
+        handle
+    };
+    let mut player_audio: Option<Audio> = None;
 
     let mut is_running = true;
     while is_running {
@@ -163,22 +172,26 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                 &mut episode_list_scroll_state,
             );
 
-            let player_status = if let Some(sink) = &player_sink {
-                sink.get_pos();
-                if sink.is_paused() {
+            let player_widget = if let Some(audio) = &player_audio {
+                let player_status = if audio.sink.is_paused() {
                     "Paused"
                 } else {
                     "Playing"
-                }
+                };
+
+                Paragraph::new(vec![
+                    Line::from(format!("[{}] {}", player_status, audio.title)),
+                    Line::from(format!(
+                        "{}/{}",
+                        format_audio_duration(audio.sink.get_pos()),
+                        format_audio_duration(audio.total_duration)
+                    )),
+                ])
             } else {
-                "Stopped"
+                Paragraph::new("[Stopped]")
             };
             frame.render_widget(
-                Paragraph::new(vec![Line::from(vec![
-                    format!("[{}] ", player_status).as_str().into(),
-                    player_title.as_str().into(),
-                ])])
-                .block(Block::bordered().title("Player")),
+                player_widget.block(Block::bordered().title("Player")),
                 player_area,
             );
 
@@ -303,164 +316,177 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             }
         })?;
 
-        match event::read()? {
-            Event::Key(key_event) if key_event.is_press() => {
-                match key_event.code {
-                    KeyCode::Char('q') => is_running = false,
-                    KeyCode::Char('a') => {
-                        url_to_add.clear();
-                        current_view = View::AddPodcast;
-                    }
-                    KeyCode::Char('u') => {
-                        for podcast in podcasts.iter_mut() {
-                            let podcast_text = reqwest::get(&podcast.url).await?.text().await?;
-                            *podcast = parse_podcast_data(&podcast.url, &podcast_text).await?;
-                            let feed_path =
-                                data_path.clone().join(&podcast.title).join("feed.json");
-                            let contents = serde_json::to_string_pretty(&podcast)?;
-                            tokio::fs::write(feed_path, contents).await?;
+        if event::poll(Duration::from_millis(250))? {
+            match event::read()? {
+                Event::Key(key_event) if key_event.is_press() || key_event.is_repeat() => {
+                    match key_event.code {
+                        KeyCode::Char('q') => is_running = false,
+                        KeyCode::Char('a') => {
+                            url_to_add.clear();
+                            current_view = View::AddPodcast;
                         }
-                    }
-                    KeyCode::Char(' ') => {
-                        if let Some(sink) = &player_sink {
-                            if sink.is_paused() {
-                                sink.play();
-                            } else {
-                                sink.pause();
+                        KeyCode::Char('u') => {
+                            for podcast in podcasts.iter_mut() {
+                                let podcast_text = reqwest::get(&podcast.url).await?.text().await?;
+                                *podcast = parse_podcast_data(&podcast.url, &podcast_text).await?;
+                                let feed_path =
+                                    data_path.clone().join(&podcast.title).join("feed.json");
+                                let contents = serde_json::to_string_pretty(&podcast)?;
+                                tokio::fs::write(feed_path, contents).await?;
                             }
                         }
-                    }
-                    _ => {}
-                }
-
-                match current_view {
-                    View::PodcastList => match key_event.code {
-                        // TODO(miobi): support delete podcast
-                        KeyCode::Enter => {
-                            if let Some(index) = podcast_list_state.selected() {
-                                if !podcasts[index].episodes.is_empty() {
-                                    episode_list_state.select_first();
-                                }
-                            }
-                            current_view = View::EpisodeList;
-                        }
-                        KeyCode::Char('k') => {
-                            podcast_list_state.select_previous();
-                            podcast_list_scroll_state.prev();
-                            episode_list_state.select_first();
-                            episode_list_scroll_state.first();
-                        }
-                        KeyCode::Char('j') => {
-                            podcast_list_state.select_next();
-                            podcast_list_scroll_state.next();
-                            episode_list_state.select_first();
-                            episode_list_scroll_state.first();
-                        }
-                        KeyCode::Char('i') => {
-                            podcast_info_scroll = 0;
-                            podcast_info_scroll_state.first();
-                            current_view = View::PodcastInfo;
-                        }
-                        _ => {}
-                    },
-                    View::PodcastInfo => match key_event.code {
-                        KeyCode::Esc => current_view = View::PodcastList,
-                        KeyCode::Char('k') => {
-                            podcast_info_scroll = podcast_info_scroll.saturating_sub(1);
-                            podcast_info_scroll_state.prev();
-                        }
-                        KeyCode::Char('j') => {
-                            podcast_info_scroll = podcast_info_scroll.saturating_add(1);
-                            podcast_info_scroll_state.next();
-                        }
-                        _ => {}
-                    },
-                    View::AddPodcast => match key_event.code {
-                        KeyCode::Esc => current_view = View::PodcastList,
-                        KeyCode::Char('p') => {
-                            let clipboard = Clipboard::new()?.get_text()?;
-                            url_to_add = clipboard;
-                        }
-                        KeyCode::Enter => {
-                            match podcasts.iter().find(|podcast| podcast.url == url_to_add) {
-                                Some(_) => {
-                                    // TODO(miobi): notify duplicate
-                                }
-                                None => {
-                                    let podcast_text =
-                                        reqwest::get(&url_to_add).await?.text().await?;
-                                    let podcast =
-                                        parse_podcast_data(&url_to_add, &podcast_text).await?;
-                                    let podcast_path = data_path.clone().join(&podcast.title);
-                                    tokio::fs::create_dir(&podcast_path).await?;
-                                    let feed_path = podcast_path.join("feed.json");
-                                    let contents = serde_json::to_string_pretty(&podcast)?;
-                                    tokio::fs::write(feed_path, contents).await?;
-
-                                    podcasts.push(podcast);
-                                    podcast_list_state.select_next();
-                                    current_view = View::PodcastList;
+                        KeyCode::Char(' ') => {
+                            if let Some(audio) = &player_audio {
+                                if audio.sink.is_paused() {
+                                    audio.sink.play();
+                                } else {
+                                    audio.sink.pause();
                                 }
                             }
                         }
                         _ => {}
-                    },
-                    View::EpisodeList => match key_event.code {
-                        KeyCode::Esc => current_view = View::PodcastList,
-                        KeyCode::Enter => {
-                            if let Some(episode_index) = episode_list_state.selected() {
-                                let podcast = &podcasts[podcast_list_state.selected().unwrap()];
-                                let episode = &podcast.episodes[episode_index];
+                    }
 
-                                // TODO(miobi): support other audio mimetype
-                                let podcast_audio_path = data_path
-                                    .clone()
-                                    .join(&podcast.title)
-                                    .join(&episode.title)
-                                    .with_extension("mp3");
-                                if !podcast_audio_path.exists() {
-                                    let podcast_episode_audio =
-                                        reqwest::get(&episode.audio_url).await?.bytes().await?;
-                                    tokio::fs::write(&podcast_audio_path, podcast_episode_audio)
+                    match current_view {
+                        View::PodcastList => match key_event.code {
+                            // TODO(miobi): support delete podcast
+                            KeyCode::Char('l') => {
+                                if let Some(index) = podcast_list_state.selected() {
+                                    if !podcasts[index].episodes.is_empty() {
+                                        episode_list_state.select_first();
+                                    }
+                                }
+                                current_view = View::EpisodeList;
+                            }
+                            KeyCode::Char('k') => {
+                                podcast_list_state.select_previous();
+                                podcast_list_scroll_state.prev();
+                                episode_list_state.select_first();
+                                episode_list_scroll_state.first();
+                            }
+                            KeyCode::Char('j') => {
+                                podcast_list_state.select_next();
+                                podcast_list_scroll_state.next();
+                                episode_list_state.select_first();
+                                episode_list_scroll_state.first();
+                            }
+                            KeyCode::Char('i') => {
+                                podcast_info_scroll = 0;
+                                podcast_info_scroll_state.first();
+                                current_view = View::PodcastInfo;
+                            }
+                            _ => {}
+                        },
+                        View::PodcastInfo => match key_event.code {
+                            KeyCode::Esc => current_view = View::PodcastList,
+                            KeyCode::Char('k') => {
+                                podcast_info_scroll = podcast_info_scroll.saturating_sub(1);
+                                podcast_info_scroll_state.prev();
+                            }
+                            KeyCode::Char('j') => {
+                                podcast_info_scroll = podcast_info_scroll.saturating_add(1);
+                                podcast_info_scroll_state.next();
+                            }
+                            _ => {}
+                        },
+                        View::AddPodcast => match key_event.code {
+                            KeyCode::Esc => current_view = View::PodcastList,
+                            KeyCode::Char('p') => {
+                                let clipboard = Clipboard::new()?.get_text()?;
+                                url_to_add = clipboard;
+                            }
+                            KeyCode::Enter => {
+                                match podcasts.iter().find(|podcast| podcast.url == url_to_add) {
+                                    Some(_) => {
+                                        // TODO(miobi): notify duplicate
+                                    }
+                                    None => {
+                                        let podcast_text =
+                                            reqwest::get(&url_to_add).await?.text().await?;
+                                        let podcast =
+                                            parse_podcast_data(&url_to_add, &podcast_text).await?;
+                                        let podcast_path = data_path.clone().join(&podcast.title);
+                                        tokio::fs::create_dir(&podcast_path).await?;
+                                        let feed_path = podcast_path.join("feed.json");
+                                        let contents = serde_json::to_string_pretty(&podcast)?;
+                                        tokio::fs::write(feed_path, contents).await?;
+
+                                        podcasts.push(podcast);
+                                        podcast_list_state.select_next();
+                                        current_view = View::PodcastList;
+                                    }
+                                }
+                            }
+                            _ => {}
+                        },
+                        View::EpisodeList => match key_event.code {
+                            KeyCode::Char('h') => current_view = View::PodcastList,
+                            KeyCode::Enter => {
+                                if let Some(episode_index) = episode_list_state.selected() {
+                                    let podcast = &podcasts[podcast_list_state.selected().unwrap()];
+                                    let episode = &podcast.episodes[episode_index];
+
+                                    // TODO(miobi): support other audio mimetype
+                                    let podcast_audio_path = data_path
+                                        .clone()
+                                        .join(&podcast.title)
+                                        .join(&episode.title)
+                                        .with_extension("mp3");
+                                    if !podcast_audio_path.exists() {
+                                        let podcast_episode_audio =
+                                            reqwest::get(&episode.audio_url).await?.bytes().await?;
+                                        tokio::fs::write(
+                                            &podcast_audio_path,
+                                            podcast_episode_audio,
+                                        )
                                         .await?;
-                                }
+                                    }
 
-                                let audio = BufReader::new(File::open(podcast_audio_path)?);
-                                player_sink =
-                                    Some(rodio::play(&player_stream_handle.mixer(), audio)?);
-                                player_title = episode.title.clone();
+                                    let audio_data =
+                                        BufReader::new(File::open(podcast_audio_path)?);
+                                    let source = Decoder::try_from(audio_data)?;
+                                    let total_duration = source.total_duration().unwrap();
+                                    let sink = Sink::connect_new(player_stream_handle.mixer());
+                                    sink.append(source);
+
+                                    player_audio = Some(Audio {
+                                        title: episode.title.clone(),
+                                        total_duration,
+                                        sink,
+                                    })
+                                }
                             }
-                        }
-                        KeyCode::Char('k') => {
-                            episode_list_state.select_previous();
-                            episode_list_scroll_state.prev();
-                        }
-                        KeyCode::Char('j') => {
-                            episode_list_state.select_next();
-                            episode_list_scroll_state.next();
-                        }
-                        KeyCode::Char('i') => {
-                            episode_info_scroll = 0;
-                            episode_info_scroll_state.first();
-                            current_view = View::EpisodeInfo;
-                        }
-                        _ => {}
-                    },
-                    View::EpisodeInfo => match key_event.code {
-                        KeyCode::Esc => current_view = View::EpisodeList,
-                        KeyCode::Char('k') => {
-                            episode_info_scroll = episode_info_scroll.saturating_sub(1);
-                            episode_info_scroll_state.prev();
-                        }
-                        KeyCode::Char('j') => {
-                            episode_info_scroll = episode_info_scroll.saturating_add(1);
-                            episode_info_scroll_state.next();
-                        }
-                        _ => {}
-                    },
+                            KeyCode::Char('k') => {
+                                episode_list_state.select_previous();
+                                episode_list_scroll_state.prev();
+                            }
+                            KeyCode::Char('j') => {
+                                episode_list_state.select_next();
+                                episode_list_scroll_state.next();
+                            }
+                            KeyCode::Char('i') => {
+                                episode_info_scroll = 0;
+                                episode_info_scroll_state.first();
+                                current_view = View::EpisodeInfo;
+                            }
+                            _ => {}
+                        },
+                        View::EpisodeInfo => match key_event.code {
+                            KeyCode::Esc => current_view = View::EpisodeList,
+                            KeyCode::Char('k') => {
+                                episode_info_scroll = episode_info_scroll.saturating_sub(1);
+                                episode_info_scroll_state.prev();
+                            }
+                            KeyCode::Char('j') => {
+                                episode_info_scroll = episode_info_scroll.saturating_add(1);
+                                episode_info_scroll_state.next();
+                            }
+                            _ => {}
+                        },
+                    }
                 }
+                _ => {}
             }
-            _ => {}
         }
     }
 
@@ -544,4 +570,14 @@ async fn parse_podcast_data(
         url: url.to_string(),
         episodes,
     })
+}
+
+fn format_audio_duration(duration: Duration) -> String {
+    let mut total_seconds = duration.as_secs();
+    let hours = total_seconds / (60 * 60);
+    total_seconds %= 60 * 60;
+    let minutes = total_seconds / 60;
+    let seconds = total_seconds % 60;
+
+    format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
 }
