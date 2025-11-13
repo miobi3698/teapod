@@ -15,7 +15,7 @@ use ratatui::{
 use rodio::{Decoder, Sink, Source};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 struct Podcast {
     title: String,
     description: String,
@@ -23,7 +23,7 @@ struct Podcast {
     episodes: Vec<Episode>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 struct Episode {
     title: String,
     description: String,
@@ -326,6 +326,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                             current_view = View::AddPodcast;
                         }
                         KeyCode::Char('u') => {
+                            // TODO(miobi): handle error
                             for podcast in podcasts.iter_mut() {
                                 let podcast_text = reqwest::get(&podcast.url).await?.text().await?;
                                 *podcast = parse_podcast_data(&podcast.url, &podcast_text).await?;
@@ -401,6 +402,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                                         // TODO(miobi): notify duplicate
                                     }
                                     None => {
+                                        // TODO(miobi): handle error
                                         let podcast_text =
                                             reqwest::get(&url_to_add).await?.text().await?;
                                         let podcast =
@@ -503,73 +505,41 @@ async fn parse_podcast_data(
         .descendants()
         .find(|node| node.has_tag_name("channel"))
         .unwrap();
-    let title = channel
-        .children()
-        .find(|node| node.has_tag_name("title"))
-        .unwrap()
-        .text()
-        .unwrap()
-        .to_string();
-    let description = channel
-        .children()
-        .find(|node| node.has_tag_name("description"))
-        .unwrap()
-        .text()
-        .unwrap_or_default()
-        .to_string();
 
-    let episodes = channel
-        .children()
-        .filter(|node| node.has_tag_name("item"))
-        .map(|node| {
-            let title = node
-                .children()
-                .find(|node| node.has_tag_name("title"))
-                .unwrap()
-                .text()
-                .unwrap()
-                .to_string();
-            let description = node
-                .children()
-                .find(|node| node.has_tag_name("description"))
-                .unwrap()
-                .text()
-                .unwrap_or_default()
-                .to_string();
-            let date = DateTime::parse_from_rfc2822(
-                node.children()
-                    .find(|node| node.has_tag_name("pubDate"))
-                    .unwrap()
-                    .text()
-                    .unwrap_or_default(),
-            )
-            .unwrap_or_default()
-            .date_naive()
-            .to_string();
-
-            let audio_url = node
-                .children()
-                .find(|node| node.has_tag_name("enclosure"))
-                .unwrap()
-                .attribute("url")
-                .unwrap()
-                .to_string();
-
-            Episode {
-                title,
-                description,
-                date,
-                audio_url,
+    let mut podcast = Podcast::default();
+    podcast.url = url.to_string();
+    for node in channel.children() {
+        match node.tag_name().name() {
+            "title" => podcast.title = node.text().unwrap().to_string(),
+            "description" => podcast.description = node.text().unwrap_or_default().to_string(),
+            "item" => {
+                let mut episode = Episode::default();
+                for subnode in node.children() {
+                    match subnode.tag_name().name() {
+                        "title" => episode.title = subnode.text().unwrap().to_string(),
+                        "description" => {
+                            episode.description = subnode.text().unwrap_or_default().to_string()
+                        }
+                        "pubDate" => {
+                            episode.date =
+                                DateTime::parse_from_rfc2822(subnode.text().unwrap_or_default())
+                                    .unwrap_or_default()
+                                    .date_naive()
+                                    .to_string()
+                        }
+                        "enclosure" => {
+                            episode.audio_url = subnode.attribute("url").unwrap().to_string()
+                        }
+                        _ => {}
+                    }
+                }
+                podcast.episodes.push(episode);
             }
-        })
-        .collect();
+            _ => {}
+        }
+    }
 
-    Ok(Podcast {
-        title,
-        description,
-        url: url.to_string(),
-        episodes,
-    })
+    Ok(podcast)
 }
 
 fn format_audio_duration(duration: Duration) -> String {
