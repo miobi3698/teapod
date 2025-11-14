@@ -58,7 +58,7 @@ struct Audio {
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let data_path = std::env::home_dir().unwrap().join(".local/share/teapod");
     if !data_path.exists() {
-        std::fs::create_dir(&data_path)?;
+        std::fs::create_dir_all(&data_path)?;
     }
 
     let mut podcasts: Vec<Podcast> = Vec::new();
