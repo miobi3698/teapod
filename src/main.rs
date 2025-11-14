@@ -238,6 +238,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
                                             podcasts.push(podcast);
                                             podcast_list_state.next();
+                                            current_popup = None;
                                             current_view = View::PodcastList;
                                         }
                                     }
