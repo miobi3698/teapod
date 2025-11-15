@@ -1,4 +1,4 @@
-use std::{error::Error, fs::File, io::BufReader, time::Duration};
+use std::{error::Error, fs::File, io::BufReader, path::Path, time::Duration};
 
 use arboard::Clipboard;
 use chrono::DateTime;
@@ -169,12 +169,8 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                         KeyCode::Char('u') => {
                             // TODO(miobi): handle error
                             for podcast in podcasts.iter_mut() {
-                                let podcast_text = reqwest::get(&podcast.url).await?.text().await?;
-                                *podcast = parse_podcast_data(&podcast.url, &podcast_text).await?;
-                                let feed_path =
-                                    data_path.clone().join(&podcast.title).join("feed.json");
-                                let contents = serde_json::to_string_pretty(&podcast)?;
-                                tokio::fs::write(feed_path, contents).await?;
+                                *podcast = download_and_save_podcast_data(&podcast.url, &data_path)
+                                    .await?;
                             }
                         }
                         KeyCode::Char(' ') => {
@@ -219,23 +215,11 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                                         }
                                         None => {
                                             // TODO(miobi): handle error
-                                            let podcast_text =
-                                                reqwest::get(&add_podcast_popup_state.url)
-                                                    .await?
-                                                    .text()
-                                                    .await?;
-                                            let podcast = parse_podcast_data(
+                                            let podcast = download_and_save_podcast_data(
                                                 &add_podcast_popup_state.url,
-                                                &podcast_text,
+                                                &data_path,
                                             )
                                             .await?;
-                                            let podcast_path =
-                                                data_path.clone().join(&podcast.title);
-                                            tokio::fs::create_dir(&podcast_path).await?;
-                                            let feed_path = podcast_path.join("feed.json");
-                                            let contents = serde_json::to_string_pretty(&podcast)?;
-                                            tokio::fs::write(feed_path, contents).await?;
-
                                             podcasts.push(podcast);
                                             podcast_list_state.next();
                                             current_popup = None;
@@ -380,5 +364,19 @@ async fn parse_podcast_data(
         }
     }
 
+    Ok(podcast)
+}
+
+async fn download_and_save_podcast_data(
+    url: &str,
+    data_path: &Path,
+) -> Result<Podcast, Box<dyn Error + Send + Sync>> {
+    let podcast_text = reqwest::get(url).await?.text().await?;
+    let podcast = parse_podcast_data(url, &podcast_text).await?;
+    let podcast_path = data_path.join(&podcast.title);
+    tokio::fs::create_dir(&podcast_path).await?;
+    let feed_path = podcast_path.join("feed.json");
+    let contents = serde_json::to_string_pretty(&podcast)?;
+    tokio::fs::write(feed_path, contents).await?;
     Ok(podcast)
 }
