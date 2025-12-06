@@ -14,6 +14,7 @@ use crate::components::{
     add_podcast_popup::{AddPodcastPopup, AddPodcastPopupState},
     episode_info_popup::{EpisodeInfoPopup, EpisodeInfoPopupState},
     episode_list::{EpisodeList, EpisodeListState},
+    error_info_popup::{ErrorInfoPopup, ErrorInfoPopupState},
     player::Player,
     podcast_info_popup::{PodcastInfoPopup, PodcastInfoPopupState},
     podcast_list::{PodcastList, PodcastListState},
@@ -46,6 +47,7 @@ enum Popup {
     PodcastInfo,
     AddPodcast,
     EpisodeInfo,
+    ErrorInfo,
 }
 
 struct Audio {
@@ -88,6 +90,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut episode_list_state = EpisodeListState::default();
     let mut episode_info_popup_state = EpisodeInfoPopupState::default();
     let mut add_podcast_popup_state = AddPodcastPopupState::default();
+    let mut error_info_popup_state = ErrorInfoPopupState::default();
 
     let mut player_audio: Option<Audio> = None;
 
@@ -153,6 +156,11 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                         frame.area(),
                         &mut episode_info_popup_state,
                     ),
+                    Popup::ErrorInfo => frame.render_stateful_widget(
+                        ErrorInfoPopup::new(),
+                        frame.area(),
+                        &mut error_info_popup_state,
+                    ),
                 }
             }
         })?;
@@ -167,10 +175,15 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                             current_popup = Some(Popup::AddPodcast);
                         }
                         KeyCode::Char('u') => {
-                            // TODO(miobi): handle error
                             for podcast in podcasts.iter_mut() {
-                                *podcast = download_and_save_podcast_data(&podcast.url, &data_path)
-                                    .await?;
+                                match download_and_save_podcast_data(&podcast.url, &data_path).await
+                                {
+                                    Ok(new_podcast) => *podcast = new_podcast,
+                                    Err(error) => {
+                                        error_info_popup_state.error_msg = error.to_string();
+                                        current_popup = Some(Popup::ErrorInfo);
+                                    }
+                                }
                             }
                         }
                         KeyCode::Char(' ') => {
@@ -201,29 +214,42 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                                     current_popup = None;
                                     current_view = View::PodcastList
                                 }
-                                KeyCode::Char('p') => {
-                                    // TODO(miobi): handle error
-                                    add_podcast_popup_state.url = Clipboard::new()?.get_text()?;
-                                }
+                                KeyCode::Char('p') => match Clipboard::new()?.get_text() {
+                                    Ok(text) => add_podcast_popup_state.url = text,
+                                    Err(error) => {
+                                        error_info_popup_state.error_msg = error.to_string();
+                                        current_popup = Some(Popup::ErrorInfo);
+                                    }
+                                },
                                 KeyCode::Enter => {
                                     match podcasts
                                         .iter()
                                         .find(|podcast| podcast.url == add_podcast_popup_state.url)
                                     {
                                         Some(_) => {
-                                            // TODO(miobi): notify duplicate
+                                            error_info_popup_state.error_msg =
+                                                "This podcast already exist locally!".to_string();
+                                            current_popup = Some(Popup::ErrorInfo);
                                         }
                                         None => {
-                                            // TODO(miobi): handle error
-                                            let podcast = download_and_save_podcast_data(
+                                            match download_and_save_podcast_data(
                                                 &add_podcast_popup_state.url,
                                                 &data_path,
                                             )
-                                            .await?;
-                                            podcasts.push(podcast);
-                                            podcast_list_state.next();
-                                            current_popup = None;
-                                            current_view = View::PodcastList;
+                                            .await
+                                            {
+                                                Ok(podcast) => {
+                                                    podcasts.push(podcast);
+                                                    podcast_list_state.next();
+                                                    current_popup = None;
+                                                    current_view = View::PodcastList;
+                                                }
+                                                Err(error) => {
+                                                    error_info_popup_state.error_msg =
+                                                        error.to_string();
+                                                    current_popup = Some(Popup::ErrorInfo);
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -236,6 +262,12 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                                 }
                                 KeyCode::Char('k') => episode_info_popup_state.prev(),
                                 KeyCode::Char('j') => episode_info_popup_state.next(),
+                                _ => {}
+                            },
+                            Popup::ErrorInfo => match key_event.code {
+                                KeyCode::Esc => {
+                                    current_popup = None;
+                                }
                                 _ => {}
                             },
                         }
@@ -336,13 +368,17 @@ async fn parse_podcast_data(
     for node in channel.children() {
         match node.tag_name().name() {
             "title" => podcast.title = node.text().unwrap().to_string(),
-            "description" => podcast.description = node.text().unwrap_or_default().to_string(),
+            "description" => {
+                // TODO(miobi): parse description as it might be html encoded
+                podcast.description = node.text().unwrap_or_default().to_string()
+            }
             "item" => {
                 let mut episode = Episode::default();
                 for subnode in node.children() {
                     match subnode.tag_name().name() {
                         "title" => episode.title = subnode.text().unwrap().to_string(),
                         "description" => {
+                            // TODO(miobi): parse description as it might be html encoded
                             episode.description = subnode.text().unwrap_or_default().to_string()
                         }
                         "pubDate" => {
@@ -374,7 +410,10 @@ async fn download_and_save_podcast_data(
     let podcast_text = reqwest::get(url).await?.text().await?;
     let podcast = parse_podcast_data(url, &podcast_text).await?;
     let podcast_path = data_path.join(&podcast.title);
-    tokio::fs::create_dir(&podcast_path).await?;
+    if !podcast_path.exists() {
+        tokio::fs::create_dir(&podcast_path).await?;
+    }
+
     let feed_path = podcast_path.join("feed.json");
     let contents = serde_json::to_string_pretty(&podcast)?;
     tokio::fs::write(feed_path, contents).await?;
