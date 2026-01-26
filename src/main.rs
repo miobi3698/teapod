@@ -1,350 +1,68 @@
-use std::{error::Error, fs::File, io::BufReader, path::Path, time::Duration};
+use std::{error::Error, sync::Arc, time::Duration};
 
-use arboard::Clipboard;
-use chrono::DateTime;
-use crossterm::event::{self, Event, KeyCode};
 use ratatui::{
-    layout::{Constraint, Layout},
-    widgets::Paragraph,
+    crossterm::event::{self, Event, KeyCode, KeyEventKind},
+    layout::{Constraint, Direction, Layout},
+    style::{Style, Stylize},
+    text::{Line, Span},
+    widgets::{Block, List, ListState, Paragraph, StatefulWidget, Widget, Wrap},
 };
-use rodio::{Decoder, Sink, Source};
-use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 
-use crate::components::{
-    add_podcast_popup::{AddPodcastPopup, AddPodcastPopupState},
-    episode_info_popup::{EpisodeInfoPopup, EpisodeInfoPopupState},
-    episode_list::{EpisodeList, EpisodeListState},
-    error_info_popup::{ErrorInfoPopup, ErrorInfoPopupState},
-    player::Player,
-    podcast_info_popup::{PodcastInfoPopup, PodcastInfoPopupState},
-    podcast_list::{PodcastList, PodcastListState},
-};
-
-mod components;
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct Podcast {
-    title: String,
-    description: String,
-    url: String,
-    episodes: Vec<Episode>,
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct Episode {
-    title: String,
-    description: String,
-    date: String,
-    audio_url: String,
-}
-
-enum View {
-    PodcastList,
-    EpisodeList,
-}
-
-enum Popup {
-    PodcastInfo,
-    AddPodcast,
-    EpisodeInfo,
-    ErrorInfo,
-}
-
-struct Audio {
-    title: String,
-    total_duration: Duration,
-    sink: Sink,
-}
+type AnyError = Box<dyn Send + Sync + Error>;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
-    let data_path = std::env::home_dir().unwrap().join(".local/share/teapod");
-    if !data_path.exists() {
-        std::fs::create_dir_all(&data_path)?;
-    }
+async fn main() -> Result<(), AnyError> {
+    let mut app = App::default();
+    let mut app_ui_state = AppUIState::default();
 
-    let mut podcasts: Vec<Podcast> = Vec::new();
-    for entry in std::fs::read_dir(&data_path)? {
-        let entry = entry?;
-        let path = entry.path().join("feed.json");
-        if path.exists() {
-            let contents = tokio::fs::read_to_string(path).await?;
-            let podcast = serde_json::from_str(&contents)?;
-            podcasts.push(podcast);
-        }
-    }
+    let urls = ["https://changelog.fm/rss", "https://feed.syntax.fm/"];
+    let client = Arc::new(reqwest::Client::new());
+    let (tx, mut rx) = mpsc::channel(urls.len());
+    for url in urls {
+        let tx = tx.clone();
+        let client = client.clone();
+        tokio::spawn(async move {
+            let res = client.get(url).send().await?;
+            let text = res.text().await?;
+            let doc = roxmltree::Document::parse(text.as_str())?;
+            if let Some(channel) = doc.descendants().find(|n| n.has_tag_name("channel")) {
+                let title = channel
+                    .descendants()
+                    .find(|n| n.has_tag_name("title"))
+                    .map(|n| n.text())
+                    .flatten()
+                    .unwrap_or_default()
+                    .to_string();
+                let description = channel
+                    .descendants()
+                    .find(|n| n.has_tag_name("description"))
+                    .map(|n| n.text())
+                    .flatten()
+                    .unwrap_or_default()
+                    .to_string();
+                let podcast = Podcast { title, description };
+                tx.send(podcast).await?;
+            }
 
-    let player_stream_handle = {
-        let mut handle = rodio::OutputStreamBuilder::open_default_stream()?;
-        handle.log_on_drop(false);
-        handle
-    };
+            Ok::<_, AnyError>(())
+        });
+    }
 
     let mut terminal = ratatui::init();
 
-    let mut current_view = View::PodcastList;
-    let mut current_popup: Option<Popup> = None;
-
-    let mut podcast_list_state = PodcastListState::default();
-    let mut podcast_info_popup_state = PodcastInfoPopupState::default();
-    let mut episode_list_state = EpisodeListState::default();
-    let mut episode_info_popup_state = EpisodeInfoPopupState::default();
-    let mut add_podcast_popup_state = AddPodcastPopupState::default();
-    let mut error_info_popup_state = ErrorInfoPopupState::default();
-
-    let mut player_audio: Option<Audio> = None;
-
-    let mut is_running = true;
-    while is_running {
+    while !app.should_quit {
         terminal.draw(|frame| {
-            let [header_area, main_area, player_area, footer_area] = Layout::vertical([
-                Constraint::Length(1),
-                Constraint::Fill(1),
-                Constraint::Length(4),
-                Constraint::Length(1),
-            ])
-            .areas(frame.area());
-
-            frame.render_widget(Paragraph::new("Teapod"), header_area);
-
-            let [podcast_list_area, episode_list_area] =
-                Layout::horizontal([Constraint::Fill(1), Constraint::Fill(2)]).areas(main_area);
-
-            podcast_list_state.focus(matches!(current_view, View::PodcastList));
-            frame.render_stateful_widget(
-                PodcastList::new(&podcasts),
-                podcast_list_area,
-                &mut podcast_list_state,
-            );
-
-            let episodes = podcast_list_state
-                .selected()
-                .map(|index| podcasts[index].episodes.as_slice())
-                .unwrap_or_default();
-            episode_list_state.focus(matches!(current_view, View::EpisodeList));
-            frame.render_stateful_widget(
-                EpisodeList::new(episodes),
-                episode_list_area,
-                &mut episode_list_state,
-            );
-
-            frame.render_widget(Player::new(&player_audio), player_area);
-
-            frame.render_widget(
-                Paragraph::new("q: quit, a: add, u: update, d: delete"),
-                footer_area,
-            );
-
-            if let Some(popup) = &current_popup {
-                match popup {
-                    Popup::PodcastInfo => frame.render_stateful_widget(
-                        PodcastInfoPopup::new(
-                            podcast_list_state.selected().map(|index| &podcasts[index]),
-                        ),
-                        frame.area(),
-                        &mut podcast_info_popup_state,
-                    ),
-                    Popup::AddPodcast => frame.render_stateful_widget(
-                        AddPodcastPopup::new(),
-                        frame.area(),
-                        &mut add_podcast_popup_state,
-                    ),
-                    Popup::EpisodeInfo => frame.render_stateful_widget(
-                        EpisodeInfoPopup::new(
-                            episode_list_state.selected().map(|index| &episodes[index]),
-                        ),
-                        frame.area(),
-                        &mut episode_info_popup_state,
-                    ),
-                    Popup::ErrorInfo => frame.render_stateful_widget(
-                        ErrorInfoPopup::new(),
-                        frame.area(),
-                        &mut error_info_popup_state,
-                    ),
-                }
-            }
+            frame.render_stateful_widget(&app, frame.area(), &mut app_ui_state);
         })?;
 
         if event::poll(Duration::from_millis(250))? {
-            match event::read()? {
-                Event::Key(key_event) if key_event.is_press() => {
-                    match key_event.code {
-                        KeyCode::Char('q') => is_running = false,
-                        KeyCode::Char('a') => {
-                            add_podcast_popup_state.url.clear();
-                            current_popup = Some(Popup::AddPodcast);
-                        }
-                        KeyCode::Char('u') => {
-                            for podcast in podcasts.iter_mut() {
-                                match download_and_save_podcast_data(&podcast.url, &data_path).await
-                                {
-                                    Ok(new_podcast) => *podcast = new_podcast,
-                                    Err(error) => {
-                                        error_info_popup_state.error_msg = error.to_string();
-                                        current_popup = Some(Popup::ErrorInfo);
-                                    }
-                                }
-                            }
-                        }
-                        KeyCode::Char(' ') => {
-                            if let Some(audio) = &player_audio {
-                                if audio.sink.is_paused() {
-                                    audio.sink.play();
-                                } else {
-                                    audio.sink.pause();
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
+            app.handle_event(event::read()?);
+        }
 
-                    if let Some(popup) = &current_popup {
-                        match popup {
-                            Popup::PodcastInfo => match key_event.code {
-                                KeyCode::Esc => {
-                                    current_popup = None;
-                                    current_view = View::PodcastList;
-                                }
-                                KeyCode::Char('k') => podcast_info_popup_state.prev(),
-                                KeyCode::Char('j') => podcast_info_popup_state.next(),
-                                _ => {}
-                            },
-                            Popup::AddPodcast => match key_event.code {
-                                KeyCode::Esc => {
-                                    current_popup = None;
-                                    current_view = View::PodcastList
-                                }
-                                KeyCode::Char('p') => match Clipboard::new()?.get_text() {
-                                    Ok(text) => add_podcast_popup_state.url = text,
-                                    Err(error) => {
-                                        error_info_popup_state.error_msg = error.to_string();
-                                        current_popup = Some(Popup::ErrorInfo);
-                                    }
-                                },
-                                KeyCode::Enter => {
-                                    match podcasts
-                                        .iter()
-                                        .find(|podcast| podcast.url == add_podcast_popup_state.url)
-                                    {
-                                        Some(_) => {
-                                            error_info_popup_state.error_msg =
-                                                "This podcast already exist locally!".to_string();
-                                            current_popup = Some(Popup::ErrorInfo);
-                                        }
-                                        None => {
-                                            match download_and_save_podcast_data(
-                                                &add_podcast_popup_state.url,
-                                                &data_path,
-                                            )
-                                            .await
-                                            {
-                                                Ok(podcast) => {
-                                                    podcasts.push(podcast);
-                                                    podcast_list_state.next();
-                                                    current_popup = None;
-                                                    current_view = View::PodcastList;
-                                                }
-                                                Err(error) => {
-                                                    error_info_popup_state.error_msg =
-                                                        error.to_string();
-                                                    current_popup = Some(Popup::ErrorInfo);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            },
-                            Popup::EpisodeInfo => match key_event.code {
-                                KeyCode::Esc => {
-                                    current_popup = None;
-                                    current_view = View::EpisodeList;
-                                }
-                                KeyCode::Char('k') => episode_info_popup_state.prev(),
-                                KeyCode::Char('j') => episode_info_popup_state.next(),
-                                _ => {}
-                            },
-                            Popup::ErrorInfo => match key_event.code {
-                                KeyCode::Esc => {
-                                    current_popup = None;
-                                }
-                                _ => {}
-                            },
-                        }
-                    } else {
-                        match &current_view {
-                            View::PodcastList => match key_event.code {
-                                KeyCode::Enter => current_view = View::EpisodeList,
-                                KeyCode::Char('k') => {
-                                    podcast_list_state.prev();
-                                    episode_list_state.first();
-                                }
-                                KeyCode::Char('j') => {
-                                    podcast_list_state.next();
-                                    episode_list_state.first();
-                                }
-                                KeyCode::Char('i') => {
-                                    podcast_info_popup_state.first();
-                                    current_popup = Some(Popup::PodcastInfo);
-                                }
-                                KeyCode::Char('d') => {
-                                    // TODO(miobi): support delete podcast
-                                }
-                                _ => {}
-                            },
-                            View::EpisodeList => match key_event.code {
-                                KeyCode::Esc => current_view = View::PodcastList,
-                                KeyCode::Enter => {
-                                    if let Some(episode_index) = episode_list_state.selected() {
-                                        let podcast =
-                                            &podcasts[podcast_list_state.selected().unwrap()];
-                                        let episode = &podcast.episodes[episode_index];
-
-                                        // TODO(miobi): support other audio mimetype
-                                        let podcast_audio_path = data_path
-                                            .clone()
-                                            .join(&podcast.title)
-                                            .join(&episode.title)
-                                            .with_extension("mp3");
-                                        if !podcast_audio_path.exists() {
-                                            let podcast_episode_audio =
-                                                reqwest::get(&episode.audio_url)
-                                                    .await?
-                                                    .bytes()
-                                                    .await?;
-                                            tokio::fs::write(
-                                                &podcast_audio_path,
-                                                podcast_episode_audio,
-                                            )
-                                            .await?;
-                                        }
-
-                                        let audio_data =
-                                            BufReader::new(File::open(podcast_audio_path)?);
-                                        let source = Decoder::try_from(audio_data)?;
-                                        let total_duration = source.total_duration().unwrap();
-                                        let sink = Sink::connect_new(player_stream_handle.mixer());
-                                        sink.append(source);
-
-                                        player_audio = Some(Audio {
-                                            title: episode.title.clone(),
-                                            total_duration,
-                                            sink,
-                                        })
-                                    }
-                                }
-                                KeyCode::Char('k') => episode_list_state.prev(),
-                                KeyCode::Char('j') => episode_list_state.next(),
-                                KeyCode::Char('i') => {
-                                    episode_info_popup_state.first();
-                                    current_popup = Some(Popup::EpisodeInfo);
-                                }
-                                _ => {}
-                            },
-                        }
-                    }
-                }
-                _ => {}
+        if app.podcasts.len() != urls.len() {
+            if let Some(podcast) = rx.recv().await {
+                app.podcasts.push(podcast);
             }
         }
     }
@@ -353,69 +71,89 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     Ok(())
 }
 
-async fn parse_podcast_data(
-    url: &str,
-    text: &str,
-) -> Result<Podcast, Box<dyn Error + Send + Sync>> {
-    let root = roxmltree::Document::parse(&text)?;
-    let channel = root
-        .descendants()
-        .find(|node| node.has_tag_name("channel"))
-        .unwrap();
+struct Podcast {
+    title: String,
+    description: String,
+}
 
-    let mut podcast = Podcast::default();
-    podcast.url = url.to_string();
-    for node in channel.children() {
-        match node.tag_name().name() {
-            "title" => podcast.title = node.text().unwrap().to_string(),
-            "description" => {
-                // TODO(miobi): parse description as it might be html encoded
-                podcast.description = node.text().unwrap_or_default().to_string()
-            }
-            "item" => {
-                let mut episode = Episode::default();
-                for subnode in node.children() {
-                    match subnode.tag_name().name() {
-                        "title" => episode.title = subnode.text().unwrap().to_string(),
-                        "description" => {
-                            // TODO(miobi): parse description as it might be html encoded
-                            episode.description = subnode.text().unwrap_or_default().to_string()
-                        }
-                        "pubDate" => {
-                            episode.date =
-                                DateTime::parse_from_rfc2822(subnode.text().unwrap_or_default())
-                                    .unwrap_or_default()
-                                    .date_naive()
-                                    .to_string()
-                        }
-                        "enclosure" => {
-                            episode.audio_url = subnode.attribute("url").unwrap().to_string()
-                        }
-                        _ => {}
-                    }
+enum ViewKind {
+    PodcastInfo(usize),
+}
+
+#[derive(Default)]
+struct App {
+    should_quit: bool,
+    view_stack: Vec<ViewKind>,
+    podcasts: Vec<Podcast>,
+}
+
+#[derive(Default)]
+struct AppUIState {
+    podcast_list_state: ListState,
+}
+
+impl App {
+    fn handle_event(&mut self, event: Event) {
+        match event {
+            Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
+                match key_event.code {
+                    KeyCode::Char('q') => self.should_quit = true,
+                    KeyCode::Char('i') => self.view_stack.push(ViewKind::PodcastInfo(0)),
+                    KeyCode::Esc => _ = self.view_stack.pop(),
+                    _ => {}
                 }
-                podcast.episodes.push(episode);
             }
             _ => {}
         }
     }
-
-    Ok(podcast)
 }
 
-async fn download_and_save_podcast_data(
-    url: &str,
-    data_path: &Path,
-) -> Result<Podcast, Box<dyn Error + Send + Sync>> {
-    let podcast_text = reqwest::get(url).await?.text().await?;
-    let podcast = parse_podcast_data(url, &podcast_text).await?;
-    let podcast_path = data_path.join(&podcast.title);
-    if !podcast_path.exists() {
-        tokio::fs::create_dir(&podcast_path).await?;
-    }
+impl StatefulWidget for &App {
+    type State = AppUIState;
 
-    let feed_path = podcast_path.join("feed.json");
-    let contents = serde_json::to_string_pretty(&podcast)?;
-    tokio::fs::write(feed_path, contents).await?;
-    Ok(podcast)
+    fn render(
+        self,
+        area: ratatui::prelude::Rect,
+        buf: &mut ratatui::prelude::Buffer,
+        state: &mut Self::State,
+    ) {
+        let main_layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Fill(1),
+                Constraint::Length(5),
+            ])
+            .split(area);
+
+        Paragraph::new(Span::styled("Teapod", Style::default().bold())).render(main_layout[0], buf);
+        match self.view_stack.last() {
+            Some(view) => match view {
+                ViewKind::PodcastInfo(index) => {
+                    let podcast = &self.podcasts[*index];
+                    let title = Line::from(vec![
+                        Span::styled("Info: ", Style::new().bold()),
+                        Span::raw(podcast.title.as_str()),
+                    ]);
+                    Paragraph::new(podcast.description.as_str())
+                        .wrap(Wrap { trim: true })
+                        .block(Block::bordered().title(title))
+                        .render(main_layout[1], buf);
+                }
+            },
+            None => {
+                StatefulWidget::render(
+                    List::new(self.podcasts.iter().map(|podcast| podcast.title.as_str())).block(
+                        Block::bordered().title(Span::raw("Browser").style(Style::new().bold())),
+                    ),
+                    main_layout[1],
+                    buf,
+                    &mut state.podcast_list_state,
+                );
+            }
+        }
+        Block::bordered()
+            .title(Span::raw("Player").style(Style::new().bold()))
+            .render(main_layout[2], buf);
+    }
 }
