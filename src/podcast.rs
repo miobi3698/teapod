@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::AnyError;
 use chrono::DateTime;
@@ -115,4 +115,21 @@ pub async fn save_podcast_info_to_path(podcast: &Podcast, path: &Path) -> Result
     let json = serde_json::to_string(podcast)?;
     tokio::fs::write(feed_file, json).await?;
     Ok(())
+}
+
+pub async fn download_podcast_audio_to_path(podcast: &Podcast, episode: &Episode, path: &Path) -> Result<PathBuf, AnyError> {
+    let mut audio_file = path.join(&podcast.title).join(&episode.title);
+    match episode.mime_type.as_str() {
+        "audio/mpeg" => {
+            audio_file = audio_file.with_extension("mp3");
+            if !audio_file.exists() {
+                let res = reqwest::get(&episode.url).await?;
+                let contents = res.bytes().await?;
+                tokio::fs::write(&audio_file, contents).await?;
+            }
+
+            Ok(audio_file)
+        }
+        _ => Err("audio format not supported".into())
+    }
 }

@@ -5,12 +5,13 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, List, ListState, Paragraph, Wrap},
+    widgets::{Block, List, ListState, Paragraph, Row, Table, TableState, Wrap},
 };
 use rodio::{Sink, Source};
 
 use crate::podcast::{
-    PODCAST_FEED_FILE, Podcast, download_podcast_info_from_url, save_podcast_info_to_path,
+    PODCAST_FEED_FILE, Podcast, download_podcast_audio_to_path, download_podcast_info_from_url,
+    save_podcast_info_to_path,
 };
 
 mod podcast;
@@ -67,10 +68,12 @@ async fn main() -> Result<(), AnyError> {
     let mut player: Option<PlayerState> = None;
 
     let mut terminal = ratatui::init();
+
     let title_style = Style::new().bold();
+    let table_header_style = Style::new().underlined();
 
     let mut podcast_list_state = ListState::default();
-    let mut episode_list_state = ListState::default();
+    let mut episode_list_table_state = TableState::default();
 
     let mut view_stack = Vec::<ViewKind>::new();
     let mut add_podcast_url = String::new();
@@ -126,30 +129,54 @@ async fn main() -> Result<(), AnyError> {
                     ),
                     ViewKind::EpisodeList => {
                         let podcast = &podcasts[podcast_list_state.selected().unwrap()];
-                        if episode_list_state.selected().is_none() && podcast.episodes.len() > 0 {
-                            episode_list_state.select_first();
+                        if episode_list_table_state.selected().is_none()
+                            && podcast.episodes.len() > 0
+                        {
+                            episode_list_table_state.select_first();
                         }
 
                         frame.render_stateful_widget(
-                            List::new(
+                            Table::new(
                                 podcast
                                     .episodes
                                     .iter()
-                                    .map(|episode| episode.title.as_str())
+                                    .map(|episode| {
+                                        let is_downloaded = data_path
+                                            .join(&podcast.title)
+                                            .join(&episode.title)
+                                            .with_extension("mp3")
+                                            .exists();
+
+                                        Row::new(vec![
+                                            episode.title.as_str(),
+                                            episode.pub_date.as_str(),
+                                            if is_downloaded { "Yes" } else { "No" },
+                                        ])
+                                    })
                                     .collect::<Vec<_>>(),
+                                [
+                                    Constraint::Fill(1),
+                                    Constraint::Length(10),
+                                    Constraint::Length(10),
+                                ],
+                            )
+                            .header(
+                                Row::new(vec!["Title", "Date", "Downloaded"])
+                                    .style(table_header_style),
                             )
                             .block(Block::bordered().title(Line::from(vec![
                                 Span::styled(podcast.title.as_str(), title_style),
                                 Span::styled(" / Episodes", title_style),
                             ])))
-                            .highlight_style(Style::new().reversed()),
+                            .row_highlight_style(Style::new().reversed()),
                             main_layout[1],
-                            &mut episode_list_state,
+                            &mut episode_list_table_state,
                         );
                     }
                     ViewKind::EpisodeInfo => {
                         let podcast = &podcasts[podcast_list_state.selected().unwrap()];
-                        let episode = &podcast.episodes[episode_list_state.selected().unwrap()];
+                        let episode =
+                            &podcast.episodes[episode_list_table_state.selected().unwrap()];
 
                         frame.render_widget(
                             Paragraph::new(vec![Line::from(vec![
@@ -259,14 +286,16 @@ async fn main() -> Result<(), AnyError> {
                                 ViewKind::EpisodeList => match key_event.code {
                                     KeyCode::Esc => _ = view_stack.pop(),
                                     KeyCode::Char('i') => {
-                                        if episode_list_state.selected().is_some() {
+                                        if episode_list_table_state.selected().is_some() {
                                             view_stack.push(ViewKind::EpisodeInfo);
                                         }
                                     }
-                                    KeyCode::Char('k') => episode_list_state.select_previous(),
-                                    KeyCode::Char('j') => episode_list_state.select_next(),
+                                    KeyCode::Char('k') => {
+                                        episode_list_table_state.select_previous()
+                                    }
+                                    KeyCode::Char('j') => episode_list_table_state.select_next(),
                                     KeyCode::Enter => {
-                                        if episode_list_state.selected().is_some() {
+                                        if episode_list_table_state.selected().is_some() {
                                             if let Some(player_state) = &player {
                                                 player_state.sink.clear();
                                             }
@@ -274,40 +303,25 @@ async fn main() -> Result<(), AnyError> {
                                             let podcast =
                                                 &podcasts[podcast_list_state.selected().unwrap()];
                                             let episode = &podcast.episodes
-                                                [episode_list_state.selected().unwrap()];
-                                            let mut audio_file =
-                                                data_path.join(&podcast.title).join(&episode.title);
-                                            match episode.mime_type.as_str() {
-                                                "audio/mpeg" => {
-                                                    audio_file = audio_file.with_extension("mp3");
-                                                    if !audio_file.exists() {
-                                                        let res =
-                                                            reqwest::get(&episode.url).await?;
-                                                        let contents = res.bytes().await?;
-                                                        tokio::fs::write(&audio_file, contents)
-                                                            .await?;
-                                                    }
-                                                    let reader =
-                                                        BufReader::new(File::open(audio_file)?);
-                                                    let source = rodio::Decoder::try_from(reader)?;
+                                                [episode_list_table_state.selected().unwrap()];
+                                            let audio_file = download_podcast_audio_to_path(
+                                                podcast, episode, &data_path,
+                                            )
+                                            .await?;
+                                            let reader = BufReader::new(File::open(audio_file)?);
+                                            let source = rodio::Decoder::try_from(reader)?;
 
-                                                    let title = format!(
-                                                        "{} / {}",
-                                                        podcast.title, episode.title
-                                                    );
-                                                    let sink =
-                                                        Sink::connect_new(&stream_handle.mixer());
-                                                    let duration =
-                                                        source.total_duration().unwrap_or_default();
-                                                    sink.append(source);
-                                                    player = Some(PlayerState {
-                                                        title,
-                                                        sink,
-                                                        duration,
-                                                    });
-                                                }
-                                                _ => {}
-                                            }
+                                            let title =
+                                                format!("{} / {}", podcast.title, episode.title);
+                                            let sink = Sink::connect_new(&stream_handle.mixer());
+                                            let duration =
+                                                source.total_duration().unwrap_or_default();
+                                            sink.append(source);
+                                            player = Some(PlayerState {
+                                                title,
+                                                sink,
+                                                duration,
+                                            });
                                         }
                                     }
                                     _ => {}
