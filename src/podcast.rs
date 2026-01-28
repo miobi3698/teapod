@@ -21,6 +21,8 @@ pub struct Episode {
     pub mime_type: String,
 }
 
+pub const PODCAST_FEED_FILE: &str = "feed.json";
+
 pub async fn download_podcast_info_from_url(url: &str) -> Result<Podcast, AnyError> {
     let res = reqwest::get(url).await?;
     let text = res.text().await?;
@@ -109,7 +111,7 @@ pub async fn save_podcast_info_to_path(podcast: &Podcast, path: &Path) -> Result
         tokio::fs::create_dir(&feed_dir).await?;
     }
 
-    let feed_file = feed_dir.join("feed.json");
+    let feed_file = feed_dir.join(PODCAST_FEED_FILE);
     let json = serde_json::to_string(podcast)?;
     tokio::fs::write(feed_file, json).await?;
     Ok(())
