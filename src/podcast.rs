@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use crate::AnyError;
 use chrono::DateTime;
 use serde::{Deserialize, Serialize};
@@ -99,4 +101,16 @@ pub async fn download_podcast_info_from_url(url: &str) -> Result<Podcast, AnyErr
         url,
         episodes,
     })
+}
+
+pub async fn save_podcast_info_to_path(podcast: &Podcast, path: &Path) -> Result<(), AnyError> {
+    let feed_dir = path.join(&podcast.title);
+    if !feed_dir.exists() {
+        tokio::fs::create_dir(&feed_dir).await?;
+    }
+
+    let feed_file = feed_dir.join("feed.json");
+    let json = serde_json::to_string(podcast)?;
+    tokio::fs::write(feed_file, json).await?;
+    Ok(())
 }

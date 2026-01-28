@@ -8,7 +8,7 @@ use ratatui::{
     widgets::{Block, List, ListState, Paragraph, Wrap},
 };
 
-use crate::podcast::{Podcast, download_podcast_info_from_url};
+use crate::podcast::{download_podcast_info_from_url, save_podcast_info_to_path, Podcast};
 
 mod podcast;
 
@@ -23,6 +23,23 @@ enum ViewKind {
 
 #[tokio::main]
 async fn main() -> Result<(), AnyError> {
+    let home_path = std::env::home_dir().ok_or("missing home directory")?;
+    let data_path = home_path.join(".local/share/teapod");
+    if !data_path.exists() {
+        tokio::fs::create_dir_all(&data_path).await?;
+    }
+
+    let mut podcasts = Vec::<Podcast>::new();
+    let mut read_dir = tokio::fs::read_dir(&data_path).await?;
+    while let Some(entry) = read_dir.next_entry().await? {
+        let feed_file = entry.path().join("feed.json");
+        if feed_file.exists() {
+            let json = tokio::fs::read_to_string(&feed_file).await?;
+            let podcast = serde_json::from_str(&json)?;
+            podcasts.push(podcast);
+        }
+    }
+
     let mut terminal = ratatui::init();
     let mut clipboard = arboard::Clipboard::new()?;
 
@@ -33,7 +50,6 @@ async fn main() -> Result<(), AnyError> {
 
     let mut view_stack = Vec::<ViewKind>::new();
     let mut add_podcast_url = String::new();
-    let mut podcasts = Vec::<Podcast>::new();
 
     let mut should_quit = false;
     while !should_quit {
@@ -68,8 +84,8 @@ async fn main() -> Result<(), AnyError> {
                                 ]),
                             ])
                             .block(Block::bordered().title(Line::from(vec![
-                                Span::styled("Podcast info: ", title_style),
-                                Span::raw(podcast.title.as_str()),
+                                Span::styled(podcast.title.as_str(), title_style),
+                                Span::styled(" / Info", title_style),
                             ])))
                             .wrap(Wrap { trim: true }),
                             main_layout[1],
@@ -99,13 +115,13 @@ async fn main() -> Result<(), AnyError> {
                                     .collect::<Vec<_>>(),
                             )
                             .block(Block::bordered().title(Line::from(vec![
-                                Span::styled("Episodes: ", title_style),
-                                Span::raw(podcast.title.as_str()),
+                                Span::styled(podcast.title.as_str(), title_style),
+                                Span::styled(" / Episodes", title_style),
                             ])))
                             .highlight_style(Style::new().reversed()),
                             main_layout[1],
                             &mut episode_list_state,
-                        )
+                        );
                     }
                     ViewKind::EpisodeInfo => {
                         let podcast = &podcasts[podcast_list_state.selected().unwrap()];
@@ -117,10 +133,10 @@ async fn main() -> Result<(), AnyError> {
                                 Span::raw(episode.description.as_str()),
                             ])])
                             .block(Block::bordered().title(Line::from(vec![
-                                Span::styled("Episode info: ", title_style),
-                                Span::raw(podcast.title.as_str()),
-                                Span::raw(" | "),
-                                Span::raw(episode.title.as_str()),
+                                Span::styled(podcast.title.as_str(), title_style),
+                                Span::raw(" / "),
+                                Span::styled(episode.title.as_str(), title_style),
+                                Span::styled(" / Info", title_style),
                             ])))
                             .wrap(Wrap { trim: true }),
                             main_layout[1],
@@ -143,7 +159,7 @@ async fn main() -> Result<(), AnyError> {
                         .highlight_style(Style::new().reversed()),
                         main_layout[1],
                         &mut podcast_list_state,
-                    )
+                    );
                 }
             }
 
@@ -170,6 +186,8 @@ async fn main() -> Result<(), AnyError> {
                                 KeyCode::Enter => {
                                     let podcast =
                                         download_podcast_info_from_url(&add_podcast_url).await?;
+                                    save_podcast_info_to_path(&podcast, &data_path).await?;
+
                                     podcasts.push(podcast);
                                     add_podcast_url.clear();
                                     _ = view_stack.pop();
