@@ -10,8 +10,8 @@ use ratatui::{
 use rodio::{Sink, Source};
 
 use crate::podcast::{
-    PODCAST_FEED_FILE, Podcast, download_podcast_audio_to_path, download_podcast_info_from_url,
-    save_podcast_info_to_path,
+    PODCAST_FEED_FILE, Podcast, check_podcast_audio_in_path, download_podcast_audio_to_path,
+    download_podcast_info_from_url, save_podcast_info_to_path, update_all_podcast_info,
 };
 
 mod podcast;
@@ -141,11 +141,9 @@ async fn main() -> Result<(), AnyError> {
                                     .episodes
                                     .iter()
                                     .map(|episode| {
-                                        let is_downloaded = data_path
-                                            .join(&podcast.title)
-                                            .join(&episode.title)
-                                            .with_extension("mp3")
-                                            .exists();
+                                        let is_downloaded = check_podcast_audio_in_path(
+                                            podcast, episode, &data_path,
+                                        );
 
                                         Row::new(vec![
                                             episode.title.as_str(),
@@ -312,7 +310,7 @@ async fn main() -> Result<(), AnyError> {
                                             let source = rodio::Decoder::try_from(reader)?;
 
                                             let title =
-                                                format!("{} / {}", podcast.title, episode.title);
+                                                format!("{} / {}", &podcast.title, &episode.title);
                                             let sink = Sink::connect_new(&stream_handle.mixer());
                                             let duration =
                                                 source.total_duration().unwrap_or_default();
@@ -333,14 +331,24 @@ async fn main() -> Result<(), AnyError> {
                             },
                             None => match key_event.code {
                                 KeyCode::Char('q') => should_quit = true,
+                                KeyCode::Char('u') => {
+                                    podcasts = update_all_podcast_info(
+                                        &podcasts
+                                            .iter()
+                                            .map(|podcast| podcast.url.as_str())
+                                            .collect(),
+                                        &data_path,
+                                    )
+                                    .await?;
+                                }
+                                KeyCode::Char('a') => view_stack.push(ViewKind::AddPodcast),
+                                KeyCode::Char('k') => podcast_list_state.select_previous(),
+                                KeyCode::Char('j') => podcast_list_state.select_next(),
                                 KeyCode::Char('i') => {
                                     if podcast_list_state.selected().is_some() {
                                         view_stack.push(ViewKind::PodcastInfo);
                                     }
                                 }
-                                KeyCode::Char('a') => view_stack.push(ViewKind::AddPodcast),
-                                KeyCode::Char('k') => podcast_list_state.select_previous(),
-                                KeyCode::Char('j') => podcast_list_state.select_next(),
                                 KeyCode::Enter => {
                                     if podcast_list_state.selected().is_some() {
                                         view_stack.push(ViewKind::EpisodeList);

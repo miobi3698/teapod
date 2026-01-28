@@ -23,10 +23,8 @@ pub struct Episode {
 
 pub const PODCAST_FEED_FILE: &str = "feed.json";
 
-pub async fn download_podcast_info_from_url(url: &str) -> Result<Podcast, AnyError> {
-    let res = reqwest::get(url).await?;
-    let text = res.text().await?;
-    let doc = roxmltree::Document::parse(text.as_str())?;
+fn parse_podcast_info_from_rss(text: &str, url: &str) -> Result<Podcast, AnyError> {
+    let doc = roxmltree::Document::parse(text)?;
 
     let channel = doc
         .descendants()
@@ -105,6 +103,12 @@ pub async fn download_podcast_info_from_url(url: &str) -> Result<Podcast, AnyErr
     })
 }
 
+pub async fn download_podcast_info_from_url(url: &str) -> Result<Podcast, AnyError> {
+    let res = reqwest::get(url).await?;
+    let text = res.text().await?;
+    parse_podcast_info_from_rss(&text, url)
+}
+
 pub async fn save_podcast_info_to_path(podcast: &Podcast, path: &Path) -> Result<(), AnyError> {
     let feed_dir = path.join(&podcast.title);
     if !feed_dir.exists() {
@@ -117,7 +121,25 @@ pub async fn save_podcast_info_to_path(podcast: &Podcast, path: &Path) -> Result
     Ok(())
 }
 
-pub async fn download_podcast_audio_to_path(podcast: &Podcast, episode: &Episode, path: &Path) -> Result<PathBuf, AnyError> {
+pub async fn update_all_podcast_info(
+    urls: &Vec<&str>,
+    path: &Path,
+) -> Result<Vec<Podcast>, AnyError> {
+    let mut podcasts = Vec::new();
+    for url in urls {
+        let podcast = download_podcast_info_from_url(*url).await?;
+        save_podcast_info_to_path(&podcast, path).await?;
+        podcasts.push(podcast);
+    }
+
+    Ok(podcasts)
+}
+
+pub async fn download_podcast_audio_to_path(
+    podcast: &Podcast,
+    episode: &Episode,
+    path: &Path,
+) -> Result<PathBuf, AnyError> {
     let mut audio_file = path.join(&podcast.title).join(&episode.title);
     match episode.mime_type.as_str() {
         "audio/mpeg" => {
@@ -130,6 +152,13 @@ pub async fn download_podcast_audio_to_path(podcast: &Podcast, episode: &Episode
 
             Ok(audio_file)
         }
-        _ => Err("audio format not supported".into())
+        _ => Err("audio format not supported".into()),
     }
+}
+
+pub fn check_podcast_audio_in_path(podcast: &Podcast, episode: &Episode, path: &Path) -> bool {
+    path.join(&podcast.title)
+        .join(&episode.title)
+        .with_extension("mp3")
+        .exists()
 }
